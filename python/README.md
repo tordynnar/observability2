@@ -48,6 +48,44 @@ chmod +x generate_protos.sh run_server.sh run_client.sh
 
 ---
 
+## Dependencies
+
+Requires **Python 3.11+** and **[uv](https://docs.astral.sh/uv/)** for dependency management. Run `uv sync --group dev` to install everything.
+
+The dependencies are defined in `pyproject.toml`. OpenTelemetry's Python ecosystem is modular — there is no single "install opentelemetry" package. Each component has a distinct role, and omitting any one of them causes a specific failure mode. They break down into four layers:
+
+### gRPC
+
+| Package | Group | Why |
+|---|---|---|
+| `grpcio` | runtime | The async gRPC runtime. Provides `grpc.aio.server()` and `grpc.aio.insecure_channel()` that the application code uses directly. |
+| `grpcio-tools` | dev | The `protoc` compiler and Python codegen plugin. Only needed to run `generate_protos.sh` — it produces `helloworld_pb2.py` and `helloworld_pb2_grpc.py` from the `.proto` file. Not imported at runtime, so it lives in the `dev` dependency group. |
+
+### OpenTelemetry Core
+
+| Package | Why |
+|---|---|
+| `opentelemetry-api` | The public API surface: `trace.get_tracer()`, `context`, propagators. All instrumentation code programs against this. By itself it's a no-op — every API call returns a non-recording stub unless an SDK is installed behind it. |
+| `opentelemetry-sdk` | The concrete SDK: `TracerProvider`, `BatchSpanProcessor`, `ConsoleSpanExporter`, `LoggerProvider`, `BatchLogRecordProcessor`, `ConsoleLogExporter`. This is what actually records spans and log records and exports them. Without it, the API layer does nothing. |
+
+### Auto-Instrumentation
+
+| Package | Why |
+|---|---|
+| `opentelemetry-instrumentation` | Provides the `initialize()` function that discovers and activates all installed instrumentors via entry points. This is the single call at the top of `server.py` and `client.py` that sets everything up. |
+| `opentelemetry-instrumentation-grpc` | Registers `GrpcInstrumentorServer` and `GrpcInstrumentorClient` as entry points. When `initialize()` discovers them, they monkey-patch `grpc.aio.server()` and `grpc.aio.insecure_channel()` to automatically wrap calls with tracing interceptors. Without this, gRPC calls produce no spans. |
+| `opentelemetry-instrumentation-logging` | Registers `LoggingInstrumentor` as an entry point. When `initialize()` discovers it, it patches Python's `logging` module to inject `otelTraceID`, `otelSpanID`, and `otelServiceName` into every `LogRecord`. Without this, log lines have no trace context. |
+
+### Distribution
+
+| Package | Why |
+|---|---|
+| `opentelemetry-distro` | Registers `OpenTelemetryConfigurator` as an entry point. The configurator reads `OTEL_*` env vars and builds the SDK — creating a `TracerProvider` with the right exporter, a `LoggerProvider`, and propagators. **This is the most subtle dependency.** Without it, `initialize()` still discovers and activates all the instrumentors (monkey-patching happens normally), but no SDK is configured. The result: every span is a `NonRecordingSpan` with `trace_id=0`, every log shows `[trace_id=0 span_id=0]`, and nothing is exported. It *looks* like instrumentation is working because the format is there, but the zeroes mean nothing is actually traced. See [Gotcha #5](#5-opentelemetry-distro-is-essential-but-easy-to-forget) for the full breakdown. |
+
+For a detailed view of how these packages interact during `initialize()`, see [The Dependency Chain](#the-dependency-chain) and [initialize-internals.md](initialize-internals.md).
+
+---
+
 ## How It Works (and Why It's Done This Way)
 
 ### The Critical Import Order
