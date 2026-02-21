@@ -4,3 +4,4 @@ python/*.pyc
 python/helloworld_pb2.py
 python/helloworld_pb2_grpc.py
 python/helloworld_pb2.pyi
+rust/target/
