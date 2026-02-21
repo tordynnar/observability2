@@ -24,26 +24,52 @@ impl Drop for TelemetryGuard {
     }
 }
 
-/// Initialize OpenTelemetry tracing + logging with stdout exporters, and set up
-/// the `tracing` subscriber with fmt, OTel trace, and OTel log bridge layers.
+/// Initialize OpenTelemetry tracing + logging, and set up the `tracing`
+/// subscriber with fmt, OTel trace, and OTel log bridge layers.
+///
+/// Exporter selection is driven by environment variables:
+/// - `OTEL_TRACES_EXPORTER`: `console`, `otlp`, or `none` (default: none)
+/// - `OTEL_LOGS_EXPORTER`: `console`, `otlp`, or `none` (default: none)
 pub fn init() -> TelemetryGuard {
     let resource = Resource::builder().build();
 
-    // Trace provider — stdout exporter with batch processor.
+    // Trace provider — exporter selected by OTEL_TRACES_EXPORTER.
     // Batch delay is controlled by OTEL_BSP_SCHEDULE_DELAY (set to 1ms in run scripts).
-    let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(opentelemetry_stdout::SpanExporter::default())
-        .with_resource(resource.clone())
-        .build();
+    let traces_exporter = std::env::var("OTEL_TRACES_EXPORTER").unwrap_or_default();
+    let mut tracer_builder = SdkTracerProvider::builder().with_resource(resource.clone());
+    tracer_builder = match traces_exporter.as_str() {
+        "console" => {
+            tracer_builder.with_batch_exporter(opentelemetry_stdout::SpanExporter::default())
+        }
+        "otlp" => tracer_builder.with_batch_exporter(
+            opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .build()
+                .expect("failed to build OTLP span exporter"),
+        ),
+        _ => tracer_builder, // "none" or unknown: no exporter
+    };
+    let tracer_provider = tracer_builder.build();
     let tracer = tracer_provider.tracer("app");
     global::set_tracer_provider(tracer_provider.clone());
 
-    // Log provider — stdout exporter with batch processor.
+    // Log provider — exporter selected by OTEL_LOGS_EXPORTER.
     // Batch delay is controlled by OTEL_BLRP_SCHEDULE_DELAY (set to 1ms in run scripts).
-    let logger_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(opentelemetry_stdout::LogExporter::default())
-        .with_resource(resource)
-        .build();
+    let logs_exporter = std::env::var("OTEL_LOGS_EXPORTER").unwrap_or_default();
+    let mut logger_builder = SdkLoggerProvider::builder().with_resource(resource);
+    logger_builder = match logs_exporter.as_str() {
+        "console" => {
+            logger_builder.with_batch_exporter(opentelemetry_stdout::LogExporter::default())
+        }
+        "otlp" => logger_builder.with_batch_exporter(
+            opentelemetry_otlp::LogExporter::builder()
+                .with_tonic()
+                .build()
+                .expect("failed to build OTLP log exporter"),
+        ),
+        _ => logger_builder, // "none" or unknown: no exporter
+    };
+    let logger_provider = logger_builder.build();
 
     global::set_text_map_propagator(TraceContextPropagator::new());
 

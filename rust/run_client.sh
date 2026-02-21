@@ -3,8 +3,7 @@ set -euo pipefail
 
 export OTEL_SERVICE_NAME="grpc-client"
 
-# Rust's stdout exporter is hardcoded (no autoexport equivalent).
-# These vars are set for documentation consistency; OTEL_SERVICE_NAME is read by the code.
+# Exporter selection — read by telemetry::init(). Options: console, otlp, none.
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
 export OTEL_PROPAGATORS="tracecontext,baggage"

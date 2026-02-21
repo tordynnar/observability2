@@ -112,11 +112,11 @@ let mut client = GreeterClient::new(channel);
 `telemetry::init()` does the following:
 
 1. **Creates a `Resource`** via `Resource::builder().build()`, which includes the built-in `SdkProvidedResourceDetector` and `EnvResourceDetector` — these read `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically.
-2. **Creates a `SdkTracerProvider`** with a `BatchSpanProcessor` wrapping a stdout `SpanExporter`.
-3. **Creates a `SdkLoggerProvider`** with a batch exporter wrapping a stdout `LogExporter`.
+2. **Creates a `SdkTracerProvider`** — reads `OTEL_TRACES_EXPORTER` and attaches a `BatchSpanProcessor` with the selected exporter (`console`, `otlp`, or none).
+3. **Creates a `SdkLoggerProvider`** — reads `OTEL_LOGS_EXPORTER` and attaches a batch exporter with the selected exporter (`console`, `otlp`, or none).
 4. **Sets the global propagator** to W3C `TraceContextPropagator`.
 5. **Builds a layered `tracing` subscriber** with three layers (see below).
-6. **Returns a `TelemetryGuard`** whose `shutdown()` method flushes both providers.
+6. **Returns a `TelemetryGuard`** that flushes and shuts down both providers when dropped.
 
 ### The `tracing` Crate: Rust's Unified Diagnostics Layer
 
@@ -163,8 +163,8 @@ The launch scripts set these environment variables.
 | Variable | Value | Read by |
 |---|---|---|
 | `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `Resource::builder()` includes `SdkProvidedResourceDetector`, which reads this env var automatically and sets `service.name` on the resource attached to all spans and log records. Falls back to `OTEL_RESOURCE_ATTRIBUTES`, then `"unknown_service"`. |
-| `OTEL_TRACES_EXPORTER` | `console` | Not read by code (stdout exporter is hardcoded). Set for documentation consistency with Go/Python. |
-| `OTEL_LOGS_EXPORTER` | `console` | Not read by code (stdout exporter is hardcoded). Set for documentation consistency with Go/Python. |
+| `OTEL_TRACES_EXPORTER` | `console` | Read by `telemetry::init()` to select the span exporter: `console` (stdout), `otlp` (gRPC to collector), or `none`/unset (no exporter). |
+| `OTEL_LOGS_EXPORTER` | `console` | Read by `telemetry::init()` to select the log exporter: `console` (stdout), `otlp` (gRPC to collector), or `none`/unset (no exporter). |
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | Not read by code (W3C TraceContext is hardcoded). Set for documentation consistency. |
 | `OTEL_BSP_SCHEDULE_DELAY` | `1` | `BatchSpanProcessor` schedule delay in milliseconds (default: 5000). Read by the SDK's `BatchConfigBuilder` via `init_from_env_vars()`. Setting to `1` means spans appear within ~1ms of completion. |
 | `OTEL_BLRP_SCHEDULE_DELAY` | `1` | `BatchLogProcessor` schedule delay in milliseconds (default: 1000). Read by the SDK's `BatchConfigBuilder` via `init_from_env_vars()`. Setting to `1` means log records appear immediately. |
@@ -174,32 +174,13 @@ The launch scripts set these environment variables.
 
 ## Exporting via OTLP Instead of Console
 
-The stdout exporter is useful for seeing raw telemetry during development, but in a real setup you'll send telemetry to a collector or backend via OTLP. Unlike Go's `autoexport` which reads env vars to select exporters at runtime, Rust requires a code change.
+The stdout exporter is useful for seeing raw telemetry during development, but in a real setup you'll send telemetry to a collector or backend via OTLP. No code changes are needed — just set the environment variables:
 
-### What to Change
-
-1. Add the OTLP exporter crate:
-   ```toml
-   opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
-   ```
-
-2. In `telemetry.rs`, replace the stdout exporters:
-   ```rust
-   // Before:
-   let span_exporter = opentelemetry_stdout::SpanExporter::default();
-   let log_exporter = opentelemetry_stdout::LogExporter::default();
-
-   // After:
-   use opentelemetry_otlp::SpanExporter;
-   use opentelemetry_otlp::LogExporter;
-   let span_exporter = SpanExporter::builder().with_tonic().build()?;
-   let log_exporter = LogExporter::builder().with_tonic().build()?;
-   ```
-
-3. Set the endpoint in your environment:
-   ```bash
-   export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
-   ```
+```bash
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+```
 
 ### OTLP Configuration Variables
 
@@ -293,7 +274,7 @@ Log #0
          ->  name: String(Owned("World"))
 ```
 
-Controlled by: stdout exporter hardcoded in `telemetry.rs`
+Controlled by: `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` (set to `console` in run scripts)
 
 ---
 
@@ -306,7 +287,7 @@ Controlled by: stdout exporter hardcoded in `telemetry.rs`
 | **Span creation** | Automatic via interceptors | Automatic via stats handlers | Automatic via `OtelGrpcLayer` middleware |
 | **Log correlation** | Automatic via `LoggingInstrumentor` patching `LogRecord` | Explicit: `slog.InfoContext(ctx, ...)` — must pass context | Implicit: `tracing::info!()` inside the middleware's span automatically gets trace context |
 | **OTel log bridge** | `LoggingHandler` attached to root logger by configurator | `otelslog.Handler` set as default slog handler | `OpenTelemetryTracingBridge` layer in subscriber |
-| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` | `OTEL_*` read via `autoexport` and `autoprop` | `OTEL_SERVICE_NAME` read by code; `RUST_LOG` for log filtering; exporters hardcoded |
+| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` | `OTEL_*` read via `autoexport` and `autoprop` | `OTEL_SERVICE_NAME` read by SDK; `OTEL_TRACES_EXPORTER`/`OTEL_LOGS_EXPORTER` matched by `telemetry::init()` (`console`, `otlp`, `none`); `RUST_LOG` for log filtering |
 | **Context passing** | Implicit via `contextvars` (thread-local) | Explicit via `context.Context` parameter | Implicit via `tracing`'s task-local span stack (managed by `OtelGrpcLayer`) |
 | **Proto compilation** | `generate_protos.sh` → committed `.py` files | `generate_protos.sh` → committed `.pb.go` files | `build.rs` → generated at build time, not committed |
 | **Dependency management** | `uv` + `pyproject.toml` | Go modules (`go.mod`) | Cargo (`Cargo.toml`) |
@@ -343,17 +324,17 @@ Unlike Go where you must call `slog.InfoContext(ctx, ...)`, in Rust `tracing::in
 
 Same reasoning as Go/Python — in development, you want spans and log records to appear immediately after each RPC, not up to 5 seconds later. The Rust SDK reads `OTEL_BSP_SCHEDULE_DELAY` (for traces) and `OTEL_BLRP_SCHEDULE_DELAY` (for logs) via `BatchConfigBuilder::init_from_env_vars()`. We set both to `1` in the run scripts, matching Python's approach. In production, use the defaults (5s for traces, 1s for logs) to amortize export overhead.
 
-### 8. No env-var-driven exporter selection
+### 8. Env-var-driven exporter selection
 
-Unlike Go's `autoexport` package which reads `OTEL_TRACES_EXPORTER` to select between console/OTLP/none at runtime, Rust's OTel ecosystem has no equivalent. The exporter is selected at compile time. We hardcode the stdout exporter; see [Exporting via OTLP](#exporting-via-otlp-instead-of-console) for how to swap.
+`telemetry::init()` reads `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` and matches on their values (`console`, `otlp`, or `none`/unset) to select exporters at runtime. This is a simple `match` — not a full equivalent of Go's `autoexport` — but it covers the common cases and means switching exporters requires no code changes. The OTLP exporter auto-reads `OTEL_EXPORTER_OTLP_*` env vars for endpoint, protocol, and headers.
 
 ---
 
 ## Gotchas
 
-### 1. Shutdown must be called
+### 1. The `TelemetryGuard` must be kept alive and dropped at the end
 
-If the process exits without calling `guard.shutdown()`, buffered spans and log records may be lost. The `BatchSpanProcessor` flushes on shutdown. In our code, `guard.shutdown()` is called at the end of `main()`.
+`TelemetryGuard` implements `Drop`, which flushes and shuts down both providers. The guard must be held in a `let` binding for the lifetime of the application — if the return value of `telemetry::init()` is discarded, the providers shut down immediately. In our code, `drop(guard)` is called explicitly at the end of `main()` to ensure buffered spans and log records are flushed before the process exits. Without this, short-lived processes (like the client) may exit before the batch processor has time to export.
 
 ### 2. `RUST_LOG` controls all output
 
