@@ -10,8 +10,8 @@ import (
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/exporters/autoexport"
+	"go.opentelemetry.io/contrib/propagators/autoprop"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -48,11 +48,8 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp, sdklog.WithExportTimeout(time.Millisecond))),
 	)
 
-	// Propagator — W3C Trace Context + Baggage.
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
+	// Propagator — reads OTEL_PROPAGATORS, defaults to tracecontext+baggage.
+	otel.SetTextMapPropagator(autoprop.NewTextMapPropagator())
 
 	// Bridge slog to the OTel Logs pipeline. Every slog.InfoContext(ctx, ...)
 	// call becomes an OTel LogRecord with trace_id/span_id from the context.
