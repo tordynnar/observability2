@@ -1,0 +1,423 @@
+# OpenTelemetry + gRPC in Python
+
+## Table of Contents
+
+1. [Dependencies](#dependencies)
+2. [How It Works](#how-it-works)
+3. [Server Code](#server-code)
+4. [Client Code](#client-code)
+5. [Launch Scripts](#launch-scripts)
+6. [Environment Variables](#environment-variables)
+7. [Design Decisions](#design-decisions)
+8. [Testing That It Works](#testing-that-it-works)
+9. [Troubleshooting](#troubleshooting)
+
+---
+
+## Dependencies
+
+Python 3.11+. Use `uv` for dependency management.
+
+```toml
+# pyproject.toml
+[project]
+requires-python = ">= 3.11"
+dependencies = [
+    "grpcio>=1.68.0",
+    "opentelemetry-api>=1.29.0",
+    "opentelemetry-sdk>=1.29.0",
+    "opentelemetry-instrumentation>=0.50b0",
+    "opentelemetry-instrumentation-grpc>=0.50b0",
+    "opentelemetry-instrumentation-logging>=0.50b0",
+    "opentelemetry-distro>=0.50b0",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.68.0",
+]
+```
+
+### What each package does
+
+| Package | Role |
+|---------|------|
+| `grpcio` | Async gRPC runtime (`grpc.aio.server()`, `grpc.aio.insecure_channel()`) |
+| `grpcio-tools` | protoc compiler + Python codegen plugin (dev only) |
+| `opentelemetry-api` | Public API surface. No-op by itself until an SDK is configured behind it. |
+| `opentelemetry-sdk` | Concrete SDK: `TracerProvider`, `BatchSpanProcessor`, `ConsoleSpanExporter`, `LoggerProvider`, `BatchLogRecordProcessor`, `ConsoleLogExporter`. This is what actually records and exports telemetry. |
+| `opentelemetry-instrumentation` | Provides the `initialize()` function that discovers and activates all instrumentors via entry points. |
+| `opentelemetry-instrumentation-grpc` | Registers `GrpcInstrumentorServer` and `GrpcInstrumentorClient`. When `initialize()` discovers them, they monkey-patch `grpc.aio.server()` and `grpc.aio.insecure_channel()` to add tracing interceptors. |
+| `opentelemetry-instrumentation-logging` | Registers `LoggingInstrumentor`. Patches Python's `logging` to inject `otelTraceID`, `otelSpanID`, `otelServiceName` into every `LogRecord`. |
+| `opentelemetry-distro` | **The most subtle dependency.** Registers `OpenTelemetryConfigurator` which reads `OTEL_*` env vars and builds the SDK. Without it, all instrumentors still activate (monkey-patching happens), but no SDK is configured -- every span is a `NonRecordingSpan` with `trace_id=0`, nothing is exported. See [Troubleshooting](#1-all-trace-ids-are-zero). |
+
+Install: `uv sync --group dev`
+
+---
+
+## How It Works
+
+Python uses **programmatic auto-instrumentation**. The application code has zero OTel API calls -- no `get_tracer()`, no `start_span()`, no manual context propagation. Everything is automatic.
+
+The setup relies on a single critical call:
+
+```python
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+initialize()
+```
+
+`initialize()` does four things in sequence:
+
+1. **Loads the distribution** (`opentelemetry-distro`) -- sets default OTLP env vars if not already set.
+2. **Runs the configurator** -- reads `OTEL_*` env vars, creates `TracerProvider` with the right exporter, a `LoggerProvider`, and propagators. Registers them globally.
+3. **Discovers all instrumentors** by scanning entry points -- finds `GrpcInstrumentorServer`, `GrpcInstrumentorClient`, and `LoggingInstrumentor`.
+4. **Calls `.instrument()` on each** -- the gRPC instrumentors monkey-patch `grpc.aio.server()` and `grpc.aio.insecure_channel()` to automatically wrap them with tracing interceptors. The `LoggingInstrumentor` patches `logging` to inject trace context fields.
+
+### Why the import order matters
+
+`initialize()` and `import grpc` must happen in exactly that order. The gRPC instrumentors work by monkey-patching module-level references in `grpc.aio`. If `grpc` is imported first, those references are captured before patching occurs, resulting in uninstrumented gRPC with no spans.
+
+```python
+# CORRECT:
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+initialize()
+import grpc  # gets the monkey-patched version
+
+# WRONG -- gRPC will be uninstrumented:
+import grpc  # captures un-patched references
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+initialize()  # too late
+```
+
+### Two independent log correlation mechanisms
+
+Python provides two separate features that are easy to conflate:
+
+1. **`OTEL_PYTHON_LOG_CORRELATION=true`** -- injects `otelTraceID`, `otelSpanID`, etc. into Python `LogRecord` objects and modifies the `basicConfig` format to include them. This affects **stderr output** from the standard `logging` module. You get human-readable log lines with `[trace_id=... span_id=...]`.
+
+2. **`OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true`** -- attaches an OTel `LoggingHandler` to the root logger that bridges Python log records into the OTel Logs pipeline. This produces **structured JSON** OTel log records on stdout. These records have proper `trace_id` and `span_id` fields for backend correlation.
+
+Enable both: stderr for humans, OTel log records for machines.
+
+---
+
+## Server Code
+
+```python
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+
+initialize()
+
+import asyncio
+import logging
+
+import grpc
+
+import helloworld_pb2
+import helloworld_pb2_grpc
+
+logger = logging.getLogger(__name__)
+
+
+class GreeterServicer(helloworld_pb2_grpc.GreeterServicer):
+    async def SayHello(self, request, context):
+        logger.info("Received request: name=%s", request.name)
+        return helloworld_pb2.HelloReply(message=f"Hello, {request.name}!")
+
+
+async def serve():
+    server = grpc.aio.server()
+    helloworld_pb2_grpc.add_GreeterServicer_to_server(GreeterServicer(), server)
+    server.add_insecure_port("[::]:50051")
+    logger.info("Server starting on port 50051")
+    await server.start()
+    logger.info("Server started")
+    await server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(serve())
+```
+
+Key points:
+- `initialize()` and all imports come **before** `import grpc`
+- The server code has zero OTel API calls -- `logger.info()` is plain Python logging
+- `grpc.aio.server()` returns an auto-instrumented server (monkey-patched by `initialize()`)
+- `logging.basicConfig(level=logging.INFO)` uses the trace-correlated format because `LoggingInstrumentor` patched `basicConfig` during `initialize()`
+- Uses `grpc.aio` (async API), the recommended approach for new gRPC Python applications
+
+---
+
+## Client Code
+
+```python
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+
+initialize()
+
+import asyncio
+import logging
+
+import grpc
+
+import helloworld_pb2
+import helloworld_pb2_grpc
+
+logger = logging.getLogger(__name__)
+
+
+async def run():
+    async with grpc.aio.insecure_channel("localhost:50051") as channel:
+        stub = helloworld_pb2_grpc.GreeterStub(channel)
+        response = await stub.SayHello(helloworld_pb2.HelloRequest(name="World"))
+        logger.info("Greeter response: %s", response.message)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(run())
+```
+
+Key points:
+- Same `initialize()` + import order pattern as the server
+- `grpc.aio.insecure_channel()` returns an auto-instrumented channel
+- No manual span creation or context injection -- the interceptor handles everything
+
+---
+
+## Launch Scripts
+
+### run_server.sh
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export OTEL_SERVICE_NAME="grpc-server"
+export OTEL_TRACES_EXPORTER="console"
+export OTEL_LOGS_EXPORTER="console"
+export OTEL_METRICS_EXPORTER="none"
+export OTEL_PROPAGATORS="tracecontext,baggage"
+export OTEL_PYTHON_LOG_CORRELATION="true"
+export OTEL_PYTHON_LOG_LEVEL="info"
+export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
+export OTEL_BSP_SCHEDULE_DELAY="1"
+export OTEL_BLRP_SCHEDULE_DELAY="1"
+
+exec uv run python server.py
+```
+
+### run_client.sh
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export OTEL_SERVICE_NAME="grpc-client"
+export OTEL_TRACES_EXPORTER="console"
+export OTEL_LOGS_EXPORTER="console"
+export OTEL_METRICS_EXPORTER="none"
+export OTEL_PROPAGATORS="tracecontext,baggage"
+export OTEL_PYTHON_LOG_CORRELATION="true"
+export OTEL_PYTHON_LOG_LEVEL="info"
+export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
+export OTEL_BSP_SCHEDULE_DELAY="1"
+export OTEL_BLRP_SCHEDULE_DELAY="1"
+
+exec uv run python client.py
+```
+
+---
+
+## Environment Variables
+
+### Python-Specific Variables
+
+These are unique to the Python OTel SDK:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `OTEL_METRICS_EXPORTER` | `none` | **Must be set to `none`** or the SDK installs a `PeriodicExportingMetricReader` that dumps gRPC RPC metrics to stdout every 60 seconds, interleaving with span/log output. |
+| `OTEL_PYTHON_LOG_CORRELATION` | `true` | Injects trace context into Python `LogRecord` objects and modifies `basicConfig` format. Controls **stderr** log output. |
+| `OTEL_PYTHON_LOG_LEVEL` | `info` | Sets root logger level during `initialize()`. |
+| `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED` | `true` | Bridges Python `logging` into OTel Logs pipeline. Controls **stdout** OTel log records. |
+
+### All Variables Summary
+
+| Variable | Value | Who Reads It |
+|----------|-------|-------------|
+| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `OpenTelemetryConfigurator` during `initialize()` |
+| `OTEL_TRACES_EXPORTER` | `console` | Configurator -- creates `ConsoleSpanExporter` |
+| `OTEL_LOGS_EXPORTER` | `console` | Configurator -- creates `ConsoleLogExporter` |
+| `OTEL_METRICS_EXPORTER` | `none` | Configurator -- disables metrics entirely |
+| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Configurator -- W3C Trace Context + Baggage |
+| `OTEL_PYTHON_LOG_CORRELATION` | `true` | `LoggingInstrumentor` -- stderr trace context |
+| `OTEL_PYTHON_LOG_LEVEL` | `info` | Configurator -- root logger level |
+| `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED` | `true` | Configurator -- OTel log records |
+| `OTEL_BSP_SCHEDULE_DELAY` | `1` | `BatchSpanProcessor` -- flush interval (ms) |
+| `OTEL_BLRP_SCHEDULE_DELAY` | `1` | `BatchLogRecordProcessor` -- flush interval (ms) |
+
+---
+
+## Design Decisions
+
+### 1. Programmatic auto-instrumentation over CLI launcher
+
+The project calls `initialize()` directly in Python code rather than using the `opentelemetry-instrument` CLI launcher. This is simpler, more explicit, and doesn't require wrapping your entrypoint in another process. The tradeoff is the strict import ordering requirement.
+
+### 2. Import order as the primary contract
+
+This is the single most important design decision. `initialize()` must come before `import grpc`. The gRPC instrumentors monkey-patch module-level references. If the import order is wrong, you get silent failure -- gRPC works normally but produces no telemetry.
+
+### 3. Metrics explicitly disabled
+
+`OTEL_METRICS_EXPORTER=none` prevents the SDK from creating a `PeriodicExportingMetricReader`. Without this, the gRPC instrumentation produces RPC metrics that get dumped to stdout every 60 seconds, interleaving with your span and log output. In development this is confusing; in production you'd enable metrics intentionally with a proper exporter.
+
+### 4. Both log correlation mechanisms enabled
+
+`OTEL_PYTHON_LOG_CORRELATION=true` gives human-readable stderr output with trace context. `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true` gives machine-consumable OTel log records. They serve different audiences and should both be on.
+
+### 5. `opentelemetry-distro` is the glue
+
+This package provides the `OpenTelemetryConfigurator` that reads `OTEL_*` env vars and builds the SDK. Without it, `initialize()` still discovers and runs all instrumentors (monkey-patching happens), but no SDK is configured. The result is deceptive: log lines show the trace context format (`[trace_id=... span_id=...]`), but all values are `0`. Spans are `NonRecordingSpan` and silently discarded. This is the most common source of "everything looks right but nothing works."
+
+### 6. Async gRPC throughout
+
+Both server and client use `grpc.aio` (the async API), the recommended approach for new gRPC Python applications. It works with `asyncio.run()` and matches modern Python patterns.
+
+### 7. `logging.basicConfig()` comes last and still works
+
+`LoggingInstrumentor.instrument()` (triggered by `initialize()`) patches `logging.basicConfig` itself -- it replaces the default format string with one that includes trace context fields. When you later call `logging.basicConfig(level=logging.INFO)` without specifying a `format=`, the instrumented version's format takes effect. This is why you don't need a custom log format.
+
+---
+
+## Testing That It Works
+
+### Step 1: Start the server and client
+
+```bash
+cd python
+uv sync --group dev
+./generate_protos.sh    # only needed once
+./run_server.sh         # terminal 1
+./run_client.sh         # terminal 2
+```
+
+### Step 2: Verify three types of output
+
+**1. Python logging to stderr (trace-correlated):**
+```
+2026-02-21 18:21:47,412 INFO [__main__] [server.py:18] [trace_id=b73187073037d9521d204e1593b0000b span_id=177f6a5e28fd8863 resource.service.name=grpc-server trace_sampled=True] - Received request: name=World
+```
+
+**2. OTel spans to stdout (JSON):**
+```json
+{
+    "name": "/helloworld.Greeter/SayHello",
+    "context": {
+        "trace_id": "0xb73187073037d9521d204e1593b0000b",
+        "span_id": "0x177f6a5e28fd8863"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": "0x11c6b6f5eb9047a3",
+    "attributes": {
+        "rpc.system": "grpc",
+        "rpc.method": "SayHello",
+        "rpc.service": "helloworld.Greeter"
+    }
+}
+```
+
+**3. OTel log records to stdout (JSON):**
+```json
+{
+    "body": "Received request: name=World",
+    "severity_text": "INFO",
+    "trace_id": "0xb73187073037d9521d204e1593b0000b",
+    "span_id": "0x177f6a5e28fd8863"
+}
+```
+
+### Step 3: Verify trace linkage
+
+1. Find the client span's `span_id` in the client's stdout output
+2. Find the server span's `parent_id` in the server's stdout output
+3. They should match -- this confirms W3C Trace Context propagation is working
+4. Both spans should share the same `trace_id`
+
+### Step 4: Verify log correlation
+
+The `trace_id` in the server's stderr log line should match the `trace_id` in both the client and server spans.
+
+---
+
+## Troubleshooting
+
+### 1. All trace IDs are zero
+
+**Symptom:** Log lines show `[trace_id=0 span_id=0 ...]`. No spans appear on stdout.
+
+**Cause:** `opentelemetry-distro` is not installed. Without it, `initialize()` discovers and activates all instrumentors (monkey-patching happens), but no SDK is configured. Every span is a `NonRecordingSpan` with `trace_id=0`.
+
+**Fix:** Add `opentelemetry-distro>=0.50b0` to your dependencies and reinstall:
+```bash
+uv add opentelemetry-distro
+uv sync
+```
+
+### 2. No spans appear, but logs work
+
+**Symptom:** Python `logging` output appears on stderr, but no span JSON appears on stdout.
+
+**Cause:** Import order is wrong -- `grpc` was imported before `initialize()`.
+
+**Fix:** Ensure `initialize()` is called before `import grpc`:
+```python
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+initialize()
+# ALL other imports below
+import grpc
+```
+
+### 3. Periodic metric dumps cluttering stdout
+
+**Symptom:** Every 60 seconds, a large block of metric data appears on stdout, interleaving with span/log output.
+
+**Cause:** `OTEL_METRICS_EXPORTER` is not set to `none`. The SDK creates a `PeriodicExportingMetricReader` that dumps gRPC RPC metrics.
+
+**Fix:** Add to your launch script:
+```bash
+export OTEL_METRICS_EXPORTER="none"
+```
+
+### 4. Spans appear only after 5 seconds
+
+**Symptom:** After a request, spans and log records don't appear for up to 5 seconds.
+
+**Cause:** `OTEL_BSP_SCHEDULE_DELAY` and `OTEL_BLRP_SCHEDULE_DELAY` are using defaults (5000ms).
+
+**Fix:** Set both to `1` in your launch scripts for development:
+```bash
+export OTEL_BSP_SCHEDULE_DELAY="1"
+export OTEL_BLRP_SCHEDULE_DELAY="1"
+```
+
+### 5. Client and server spans have different trace IDs
+
+**Symptom:** Both client and server produce spans, but with different `trace_id` values.
+
+**Cause:** Context propagation is not working. Either:
+- `OTEL_PROPAGATORS` is not set (check the launch scripts)
+- `opentelemetry-distro` is missing (the configurator sets up propagators)
+- The gRPC instrumentors aren't patching correctly (check import order)
+
+**Fix:** Verify all three: `opentelemetry-distro` is installed, `OTEL_PROPAGATORS=tracecontext,baggage` is set, and `initialize()` comes before `import grpc`.
+
+### 6. `logging.basicConfig()` seems to have no effect
+
+**Symptom:** Log format doesn't include trace context, or log level isn't what you expect.
+
+**Cause:** Python's `logging.basicConfig()` is a no-op if the root logger already has handlers. `initialize()` may have already added handlers.
+
+**Fix:** In this setup, `LoggingInstrumentor` patches `basicConfig` to inject the trace-correlated format. If you're setting a custom format, set it *after* `initialize()` but know that the trace context injection in `basicConfig` won't apply -- you'll need to include `%(otelTraceID)s` and `%(otelSpanID)s` manually in your format string.
