@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+helloworld_pb2.py
+helloworld_pb2_grpc.py
+helloworld_pb2.pyi
