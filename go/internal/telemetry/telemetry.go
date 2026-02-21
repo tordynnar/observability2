@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -16,21 +15,14 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 // Init sets up OpenTelemetry providers and slog. It returns a shutdown function
 // that flushes and stops all providers. The caller must invoke shutdown before
 // the process exits.
 func Init(ctx context.Context) (shutdown func(context.Context) error, err error) {
-	serviceName := os.Getenv("OTEL_SERVICE_NAME")
-	if serviceName == "" {
-		serviceName = "unknown-service"
-	}
-
-	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName(serviceName)),
-	)
+	// Reads OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES from the environment.
+	res, err := resource.New(ctx, resource.WithFromEnv())
 	if err != nil {
 		return nil, fmt.Errorf("creating resource: %w", err)
 	}
