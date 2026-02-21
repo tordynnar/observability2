@@ -1,13 +1,9 @@
 use opentelemetry::global;
-use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
-use tonic::metadata::{KeyRef, MetadataMap};
-use tracing::Span;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -87,51 +83,4 @@ pub fn init() -> TelemetryGuard {
         tracer_provider,
         logger_provider,
     }
-}
-
-// --- Context propagation helpers ---
-
-/// Wraps a `&mut MetadataMap` so the OTel propagator can inject trace context into gRPC metadata.
-struct MetadataInjector<'a>(&'a mut MetadataMap);
-
-impl Injector for MetadataInjector<'_> {
-    fn set(&mut self, key: &str, value: String) {
-        if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes()) {
-            if let Ok(val) = value.parse() {
-                self.0.insert(key, val);
-            }
-        }
-    }
-}
-
-/// Wraps a `&MetadataMap` so the OTel propagator can extract trace context from gRPC metadata.
-struct MetadataExtractor<'a>(&'a MetadataMap);
-
-impl Extractor for MetadataExtractor<'_> {
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(|v| v.to_str().ok())
-    }
-
-    fn keys(&self) -> Vec<&str> {
-        self.0
-            .keys()
-            .filter_map(|k| match k {
-                KeyRef::Ascii(k) => Some(k.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-/// Inject the current span's OTel context into gRPC metadata (for outgoing requests).
-pub fn inject_trace_context(metadata: &mut MetadataMap) {
-    let cx = Span::current().context();
-    global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&cx, &mut MetadataInjector(metadata));
-    });
-}
-
-/// Extract OTel context from gRPC metadata (for incoming requests).
-pub fn extract_trace_context(metadata: &MetadataMap) -> opentelemetry::Context {
-    global::get_text_map_propagator(|propagator| propagator.extract(&MetadataExtractor(metadata)))
 }

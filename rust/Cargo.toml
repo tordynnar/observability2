@@ -28,6 +28,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.31"
+tonic-tracing-opentelemetry = { version = "0.32", features = ["tracing_level_info"] }
+tower = "0.5"
 
 [build-dependencies]
 tonic-build = "0.14"

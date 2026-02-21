@@ -53,7 +53,7 @@ Requires a Rust toolchain (edition 2021+) and `protoc`. Dependencies are managed
 
 | Crate | Why |
 |---|---|
-| `tonic` | The gRPC framework for Rust, built on tower/hyper. Provides `Server`, `Channel`, codegen macros, and the `MetadataMap` type used for context propagation. |
+| `tonic` | The gRPC framework for Rust, built on tower/hyper. Provides `Server`, `Channel`, codegen macros. |
 | `tonic-prost` | Runtime codec that connects tonic to prost for message serialization. The generated code references `tonic_prost::ProstCodec`. |
 | `tonic-prost-build` | Build-time proto compiler. Used in `build.rs` to generate Rust types and gRPC service traits from `.proto` files. |
 | `prost` | Protocol Buffers runtime for Rust. The generated message types depend on it. |
@@ -63,7 +63,7 @@ Requires a Rust toolchain (edition 2021+) and `protoc`. Dependencies are managed
 
 | Crate | Why |
 |---|---|
-| `opentelemetry` | The public API surface: `global::set_tracer_provider()`, `global::set_text_map_propagator()`, the `Injector`/`Extractor` traits for context propagation. By itself it delegates to no-op implementations until an SDK is registered. |
+| `opentelemetry` | The public API surface: `global::set_tracer_provider()`, `global::set_text_map_propagator()`. By itself it delegates to no-op implementations until an SDK is registered. |
 | `opentelemetry_sdk` | The concrete SDK: `SdkTracerProvider`, `BatchSpanProcessor`, `SdkLoggerProvider`. This is what actually records spans and log records and exports them. |
 | `opentelemetry-stdout` | Exports spans and log records as structured output to stdout. The development-time equivalent of an OTLP exporter. |
 
@@ -73,29 +73,40 @@ Requires a Rust toolchain (edition 2021+) and `protoc`. Dependencies are managed
 |---|---|
 | `tracing` | Rust's de facto structured diagnostics crate. Provides `info!`, `info_span!`, the `Instrument` trait, and the subscriber/layer pattern. All application logging and span creation goes through `tracing`. |
 | `tracing-subscriber` | Composable subscriber layers. We use `fmt::Layer` (human-readable stderr), `EnvFilter` (controls log levels via `RUST_LOG`), and the `Registry` that holds all layers. |
-| `tracing-opentelemetry` | Bridges `tracing` spans → OTel spans. The `OpenTelemetryLayer` converts every `tracing::Span` into an OTel span, exported via the `SdkTracerProvider`. Also provides `OpenTelemetrySpanExt` for `set_parent()` and `.context()`. |
+| `tracing-opentelemetry` | Bridges `tracing` spans → OTel spans. The `OpenTelemetryLayer` converts every `tracing::Span` into an OTel span, exported via the `SdkTracerProvider`. |
 | `opentelemetry-appender-tracing` | Bridges `tracing` events → OTel log records. The `OpenTelemetryTracingBridge` converts every `tracing::info!()` call into an OTel `LogRecord`, exported via the `SdkLoggerProvider`. |
+
+### gRPC Instrumentation
+
+| Crate | Why |
+|---|---|
+| `tonic-tracing-opentelemetry` | Tower middleware layers for tonic that automatically create spans and propagate trace context for every RPC — the Rust equivalent of Go's `otelgrpc.NewServerHandler()`/`NewClientHandler()`. The server layer extracts `traceparent` from incoming metadata and creates a server span; the client layer creates a client span and injects `traceparent` into outgoing metadata. |
+| `tower` | Composable middleware framework. Used with `ServiceBuilder` to wrap tonic channels with the OTel client layer. |
 
 ---
 
 ## How It Works
 
-### Explicit Initialization (No Auto-Instrumentation)
+### Explicit Initialization, Automatic Instrumentation
 
-Like Go, Rust has no `initialize()` magic call or monkey-patching. Every piece of instrumentation is wired explicitly in code:
+Like Go, Rust has no `initialize()` magic call or monkey-patching. The OTel SDK is wired explicitly in `telemetry::init()`. But like Go's `otelgrpc` stats handlers, gRPC instrumentation is automatic via tower middleware layers:
 
 ```rust
 // src/telemetry.rs — called once at startup
 let guard = telemetry::init();
 
-// src/bin/server.rs — manual span creation and context extraction per RPC
-let parent_cx = telemetry::extract_trace_context(request.metadata());
-let span = tracing::info_span!("helloworld.Greeter/SayHello", otel.kind = "server", ...);
-span.set_parent(parent_cx);
+// src/bin/server.rs — OtelGrpcLayer auto-creates spans and extracts trace context
+Server::builder()
+    .layer(OtelGrpcLayer::default())
+    .add_service(GreeterServer::new(greeter))
+    .serve_with_shutdown(addr, shutdown_signal())
+    .await?;
 
-// src/bin/client.rs — manual span creation and context injection per RPC
-let span = tracing::info_span!("helloworld.Greeter/SayHello", otel.kind = "client", ...);
-telemetry::inject_trace_context(request.metadata_mut());
+// src/bin/client.rs — OtelGrpcLayer auto-creates spans and injects trace context
+let channel = ServiceBuilder::new()
+    .layer(OtelGrpcLayer)
+    .service(channel);
+let mut client = GreeterClient::new(channel);
 ```
 
 `telemetry::init()` does the following:
@@ -119,31 +130,29 @@ The `tracing` ecosystem uses a **subscriber pattern**: you register a global sub
 
 ### Implicit Span Context for Logs
 
-Unlike Go where you must call `slog.InfoContext(ctx, ...)` to correlate logs with traces, in Rust `tracing::info!()` inside an `.instrument(span)` block **automatically** associates with the parent span. The `OpenTelemetryTracingBridge` picks up the trace context without explicit context passing:
+Unlike Go where you must call `slog.InfoContext(ctx, ...)` to correlate logs with traces, in Rust `tracing::info!()` inside a middleware-created span **automatically** associates with the parent span. The `OpenTelemetryTracingBridge` picks up the trace context without explicit context passing:
 
 ```rust
 // Go — context passing is explicit:
 slog.InfoContext(ctx, "Received request", "name", req.GetName())
 
-// Rust — context is implicit via the instrumented span:
-async {
+// Rust — context is implicit via the middleware's span:
+async fn say_hello(&self, request: Request<HelloRequest>) -> ... {
     tracing::info!(name = %name, "Received request");
-    // ^^^ automatically gets trace_id/span_id from the enclosing span
-}.instrument(span).await
+    // ^^^ automatically gets trace_id/span_id from the OtelGrpcLayer span
+}
 ```
 
-This is because `tracing` uses a thread-local (or task-local in async) span stack. When you call `.instrument(span)`, the span is entered for the duration of the async block, and any `tracing::info!()` call within automatically inherits the span context.
+This is because `tracing` uses a thread-local (or task-local in async) span stack. The `OtelGrpcLayer` enters a span for the duration of each RPC, and any `tracing::info!()` call within the handler automatically inherits the span context.
 
-### Context Propagation via MetadataInjector/MetadataExtractor
+### Automatic Context Propagation via `tonic-tracing-opentelemetry`
 
-Since there's no equivalent to Go's `otelgrpc.NewServerHandler()` that auto-creates spans and propagates context, we implement the `Injector` and `Extractor` traits for tonic's `MetadataMap` manually:
+The `tonic-tracing-opentelemetry` crate provides tower middleware layers that are the Rust equivalent of Go's `otelgrpc.NewServerHandler()`/`NewClientHandler()`:
 
-- **`MetadataInjector`** — implements `opentelemetry::propagation::Injector`, allowing the propagator to write `traceparent` into outgoing gRPC metadata.
-- **`MetadataExtractor`** — implements `opentelemetry::propagation::Extractor`, allowing the propagator to read `traceparent` from incoming gRPC metadata.
+- **Server `OtelGrpcLayer`** — extracts `traceparent` from incoming HTTP headers, creates a server span with RPC attributes (`rpc.system`, `rpc.service`, `rpc.method`), and sets the extracted context as the span's parent.
+- **Client `OtelGrpcLayer`** — creates a client span with RPC attributes and injects `traceparent` into outgoing HTTP headers.
 
-Two helper functions wrap the propagator calls:
-- `inject_trace_context(metadata)` — gets the current span's OTel context via `tracing_opentelemetry::OpenTelemetrySpanExt::context()` and injects it.
-- `extract_trace_context(metadata)` — extracts and returns an `opentelemetry::Context` that can be set as a span's parent.
+Both layers also record `rpc.grpc.status_code` and `otel.status_code` from the response.
 
 ---
 
@@ -206,39 +215,39 @@ The stdout exporter is useful for seeing raw telemetry during development, but i
 
 Here's the exact flow when the client calls `SayHello`:
 
-### 1. Client creates a span
+### 1. Client creates a span and injects context
 
-The client code creates a `tracing::info_span!` with `otel.kind = "client"`. The `OpenTelemetryLayer` converts this into an OTel span with `SpanKind=CLIENT`. Inside the instrumented async block, `inject_trace_context()` calls the global propagator's `inject()`, which writes a `traceparent` header into the gRPC metadata:
+The client's `OtelGrpcLayer` intercepts the outgoing request. It creates a `tracing::Span` with `SpanKind=Client` and RPC attributes. It then injects the span's OTel context into the HTTP headers as a `traceparent`:
 ```
-traceparent: 00-8267a68f2f0b720634bb2d30d0710acb-5d2a1bf665bbc02b-01
+traceparent: 00-c394bed697951b977323b0c1a717497c-0a8c1b6cfa268826-01
 ```
 
 ### 2. Server extracts the context and creates a child span
 
-The server's `say_hello` handler calls `extract_trace_context(request.metadata())`, which parses the `traceparent` header and reconstructs the remote `SpanContext`. It then creates an `info_span!` with `otel.kind = "server"` and calls `span.set_parent(parent_cx)` to link it. The server span gets the **same TraceId** as the client span, and its ParentSpanId is the client span's SpanId.
+The server's `OtelGrpcLayer` intercepts the incoming request. It extracts the `traceparent` header and reconstructs the remote `SpanContext`, then creates a span with `SpanKind=Server` and sets the extracted context as the parent. The server span gets the **same TraceId** as the client span, and its ParentSpanId is the client span's SpanId.
 
 ### 3. Log correlation happens automatically
 
-Inside the `.instrument(span)` block, `tracing::info!()` events automatically carry the span's trace context. The `OpenTelemetryTracingBridge` converts these into OTel `LogRecord`s with `trace_id` and `span_id` fields.
+Inside the middleware's span, `tracing::info!()` events in the handler automatically carry the span's trace context. The `OpenTelemetryTracingBridge` converts these into OTel `LogRecord`s with `trace_id` and `span_id` fields.
 
 ### 4. Verification: matching IDs
 
 ```
 # Client span (stdout):
-TraceId      : 8267a68f2f0b720634bb2d30d0710acb
-SpanId       : 5d2a1bf665bbc02b
+TraceId      : c394bed697951b977323b0c1a717497c
+SpanId       : 0a8c1b6cfa268826
 ParentSpanId : None (root span)
 Kind         : Client
 
 # Server span (stdout):
-TraceId      : 8267a68f2f0b720634bb2d30d0710acb    # same trace!
-SpanId       : f7a0c0538352f217
-ParentSpanId : 5d2a1bf665bbc02b                      # matches client SpanId
+TraceId      : c394bed697951b977323b0c1a717497c    # same trace!
+SpanId       : 1a46c54888583b4f
+ParentSpanId : 0a8c1b6cfa268826                      # matches client SpanId
 Kind         : Server
 
 # Server OTel log record (stdout):
-TraceId: 8267a68f2f0b720634bb2d30d0710acb            # same trace as both spans
-SpanId: f7a0c0538352f217                              # matches server span
+TraceId: c394bed697951b977323b0c1a717497c            # same trace as both spans
+SpanId: 1a46c54888583b4f                              # matches server span
 ```
 
 ---
@@ -293,12 +302,12 @@ Controlled by: stdout exporter hardcoded in `telemetry.rs`
 | Aspect | Python | Go | Rust |
 |---|---|---|---|
 | **Initialization** | `initialize()` — discovers and activates instrumentors + SDK via entry points and env vars | Explicit: create providers, set globals, pass stats handlers | Explicit: create providers, build layered `tracing` subscriber |
-| **gRPC instrumentation** | Monkey-patching via `GrpcInstrumentorServer/Client` | Stats handlers: `otelgrpc.NewServerHandler()`/`NewClientHandler()` | Manual: `Injector`/`Extractor` impls for `MetadataMap`, explicit span creation per RPC |
-| **Span creation** | Automatic via interceptors | Automatic via stats handlers | Manual: `tracing::info_span!()` + `.instrument()` |
-| **Log correlation** | Automatic via `LoggingInstrumentor` patching `LogRecord` | Explicit: `slog.InfoContext(ctx, ...)` — must pass context | Implicit: `tracing::info!()` inside `.instrument(span)` automatically gets trace context |
+| **gRPC instrumentation** | Monkey-patching via `GrpcInstrumentorServer/Client` | Stats handlers: `otelgrpc.NewServerHandler()`/`NewClientHandler()` | Tower middleware: `tonic-tracing-opentelemetry`'s `OtelGrpcLayer` for server and client |
+| **Span creation** | Automatic via interceptors | Automatic via stats handlers | Automatic via `OtelGrpcLayer` middleware |
+| **Log correlation** | Automatic via `LoggingInstrumentor` patching `LogRecord` | Explicit: `slog.InfoContext(ctx, ...)` — must pass context | Implicit: `tracing::info!()` inside the middleware's span automatically gets trace context |
 | **OTel log bridge** | `LoggingHandler` attached to root logger by configurator | `otelslog.Handler` set as default slog handler | `OpenTelemetryTracingBridge` layer in subscriber |
 | **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` | `OTEL_*` read via `autoexport` and `autoprop` | `OTEL_SERVICE_NAME` read by code; `RUST_LOG` for log filtering; exporters hardcoded |
-| **Context passing** | Implicit via `contextvars` (thread-local) | Explicit via `context.Context` parameter | Implicit via `tracing`'s task-local span stack (within `.instrument()`) |
+| **Context passing** | Implicit via `contextvars` (thread-local) | Explicit via `context.Context` parameter | Implicit via `tracing`'s task-local span stack (managed by `OtelGrpcLayer`) |
 | **Proto compilation** | `generate_protos.sh` → committed `.py` files | `generate_protos.sh` → committed `.pb.go` files | `build.rs` → generated at build time, not committed |
 | **Dependency management** | `uv` + `pyproject.toml` | Go modules (`go.mod`) | Cargo (`Cargo.toml`) |
 
@@ -318,9 +327,9 @@ The dominant Rust gRPC framework, built on tower/hyper/prost. Tower's composable
 
 Rust idiom — compile protos at build time, no generated files committed. Unlike Go (committed `.pb.go`) and Python (committed `_pb2.py`), `tonic-prost-build` integrates with Cargo's build system. Tradeoff: requires `protoc` installed on the build machine.
 
-### 4. Manual context propagation
+### 4. `tonic-tracing-opentelemetry` for automatic context propagation
 
-There's no Rust equivalent to Go's `otelgrpc.NewServerHandler()` that auto-creates spans and propagates context for every RPC. We implement `Injector`/`Extractor` for tonic's `MetadataMap` — explicit but clear. This is two small struct impls plus two helper functions in `telemetry.rs`.
+The `tonic-tracing-opentelemetry` crate provides tower middleware layers that are the Rust equivalent of Go's `otelgrpc.NewServerHandler()`/`NewClientHandler()`. The server `OtelGrpcLayer` extracts trace context from incoming requests and creates server spans; the client `OtelGrpcLayer` creates client spans and injects trace context into outgoing requests. This eliminates the need for manual `Injector`/`Extractor` implementations. We enable the `tracing_level_info` feature so the middleware's spans use `INFO` level (the default is `TRACE`, which would require `RUST_LOG=info,otel::tracing=trace`).
 
 ### 5. Layered subscriber vs separate concerns
 
@@ -328,7 +337,7 @@ The `tracing-subscriber` registry pattern composes fmt (human stderr), OTel trac
 
 ### 6. Implicit span context for logs
 
-Unlike Go where you must call `slog.InfoContext(ctx, ...)`, in Rust `tracing::info!()` inside an `.instrument(span)` block automatically associates with the parent span. The `OpenTelemetryTracingBridge` picks up the trace context without explicit context passing. This is possible because `tracing` maintains a task-local span stack — when a span is "entered" (via `.instrument()`), it becomes the current span for the duration of that async block.
+Unlike Go where you must call `slog.InfoContext(ctx, ...)`, in Rust `tracing::info!()` inside a handler automatically associates with the middleware's span. The `OpenTelemetryTracingBridge` picks up the trace context without explicit context passing. This is possible because `tracing` maintains a task-local span stack — the `OtelGrpcLayer` enters a span for the duration of each RPC, and any `tracing` event within inherits the span context.
 
 ### 7. Batch processor delay set to 1ms via env vars
 
@@ -342,26 +351,18 @@ Unlike Go's `autoexport` package which reads `OTEL_TRACES_EXPORTER` to select be
 
 ## Gotchas
 
-### 1. `otel.kind` must be a string, not a SpanKind enum
-
-When setting `otel.kind` in `info_span!`, use the string `"server"` or `"client"`. The `tracing-opentelemetry` layer recognizes these string values and maps them to the corresponding `SpanKind` enum. If you omit `otel.kind`, the span defaults to `SpanKind::Internal`.
-
-### 2. `set_parent()` returns a `Result`
-
-`span.set_parent(context)` returns a `Result` in `tracing-opentelemetry` 0.32. If the span is closed or the context is invalid, it fails silently. Use `let _ = span.set_parent(...)` to acknowledge the result.
-
-### 3. Shutdown must be called
+### 1. Shutdown must be called
 
 If the process exits without calling `guard.shutdown()`, buffered spans and log records may be lost. The `BatchSpanProcessor` flushes on shutdown. In our code, `guard.shutdown()` is called at the end of `main()`.
 
-### 4. `RUST_LOG` controls all output
+### 2. `RUST_LOG` controls all output
 
 If `RUST_LOG` is not set, the `EnvFilter` defaults to `error` only. The run scripts set `RUST_LOG=info` to ensure telemetry is visible. You can use per-module filters: `RUST_LOG=info,hyper=warn,tower=warn` to reduce noise from framework internals.
 
-### 5. Proto compilation requires `protoc`
+### 3. Proto compilation requires `protoc`
 
 Unlike Go and Python where generated code is committed, Rust compiles protos at build time. If `protoc` is not installed, `cargo build` will fail with an error from `tonic-prost-build`. Install it: `brew install protobuf` (macOS) or `apt install protobuf-compiler` (Debian/Ubuntu).
 
-### 6. The generated code needs `tonic-prost` at runtime
+### 4. The generated code needs `tonic-prost` at runtime
 
 `tonic-prost-build` generates code that references `tonic_prost::ProstCodec`. If you forget the `tonic-prost` dependency in `[dependencies]`, you'll get an "unresolved module" error. This is easy to miss because `tonic-prost-build` (the build dependency) and `tonic-prost` (the runtime dependency) are separate crates.
