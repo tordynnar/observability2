@@ -157,6 +157,8 @@ The launch scripts set these environment variables. All are read by the Go code 
 | `OTEL_TRACES_EXPORTER` | `console` | `autoexport.NewSpanExporter()` — `"console"` exports spans as JSON to stdout. Also supports `"otlp"` and `"none"`. |
 | `OTEL_LOGS_EXPORTER` | `console` | `autoexport.NewLogExporter()` — `"console"` exports log records as JSON to stdout. Also supports `"otlp"` and `"none"`. |
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | `autoprop.NewTextMapPropagator()` — selects W3C Trace Context + Baggage propagators. Also supports `b3`, `jaeger`, `xray`, etc. |
+| `OTEL_BSP_SCHEDULE_DELAY` | `1` | `telemetry.Init()` — batch span processor schedule delay in milliseconds. Controls how long spans are buffered before export. Default: `1` ms in the launch scripts; omit for the OTel default of 5000 ms. |
+| `OTEL_BLRP_SCHEDULE_DELAY` | `1` | `telemetry.Init()` — batch log record processor schedule delay in milliseconds. Controls how long log records are buffered before export. Default: `1` ms in the launch scripts; omit for the OTel default of 5000 ms. |
 
 ---
 
@@ -311,7 +313,7 @@ Produced by: `otelslog.Handler` → `autoexport` console exporter via `BatchProc
 | **gRPC instrumentation** | Monkey-patching via `GrpcInstrumentorServer/Client` | Stats handlers: `otelgrpc.NewServerHandler()`/`NewClientHandler()` passed to `grpc.NewServer()`/`grpc.NewClient()` |
 | **Log correlation** | Automatic via `LoggingInstrumentor` patching `LogRecord` | Explicit: `slog.InfoContext(ctx, ...)` — must pass context manually |
 | **OTel log bridge** | `LoggingHandler` attached to root logger by configurator | `otelslog.Handler` set as default slog handler |
-| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` to build entire SDK | `OTEL_SERVICE_NAME`, `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_PROPAGATORS` read via `resource.WithFromEnv()`, `autoexport`, and `autoprop` |
+| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` to build entire SDK | `OTEL_SERVICE_NAME`, `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_PROPAGATORS`, `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BLRP_SCHEDULE_DELAY` read via `resource.WithFromEnv()`, `autoexport`, `autoprop`, and `telemetry.Init()` |
 | **Import order** | Critical: `initialize()` must come before `import grpc` | Not applicable: no monkey-patching |
 | **Thread-local context** | Yes (`contextvars`): active span is implicitly available | No: context must be explicitly passed through `context.Context` |
 | **Proto file** | No `go_package` option needed | Requires `option go_package` (proto file copied, not symlinked) |
@@ -336,7 +338,7 @@ Go's stdlib structured logger (available since Go 1.21). It supports `context.Co
 
 ### 4. Batch processor timeout set to 1ms
 
-Same reasoning as the Python project's `OTEL_BSP_SCHEDULE_DELAY=1`: in development, you want spans and log records to appear immediately after each RPC, not up to 5 seconds later. The Go SDK does not read `OTEL_BSP_SCHEDULE_DELAY`, so this is set programmatically. In production, use the default (5s) to amortize export overhead.
+Same reasoning as the Python project's `OTEL_BSP_SCHEDULE_DELAY=1`: in development, you want spans and log records to appear immediately after each RPC, not up to 5 seconds later. The launch scripts set `OTEL_BSP_SCHEDULE_DELAY=1` and `OTEL_BLRP_SCHEDULE_DELAY=1`, which `telemetry.Init()` reads and applies. In production, omit these variables to use the default (5s) and amortize export overhead.
 
 ---
 
