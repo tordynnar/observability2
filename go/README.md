@@ -7,8 +7,7 @@ This project demonstrates distributed tracing and log/trace correlation for a Go
 A gRPC `Greeter` service with a single `SayHello` RPC. A client sends a request; the server responds. OpenTelemetry instruments both sides, producing:
 
 1. **Distributed traces** — a CLIENT span on the caller, a SERVER span on the callee, linked by W3C Trace Context propagated through gRPC metadata.
-2. **Correlated logs** — `slog` output to stderr enriched with `trace_id` and `span_id` so every log line can be joined to its trace.
-3. **OTel log records** — `slog` records bridged into the OpenTelemetry Logs pipeline and exported as structured JSON to stdout.
+2. **OTel log records** — `slog` records bridged into the OpenTelemetry Logs pipeline and exported as structured JSON to stdout, with trace_id/span_id for correlation.
 
 ## Project Structure
 
@@ -28,8 +27,8 @@ go/
 │   └── telemetry/
 │       └── telemetry.go              # OTel initialization (providers, exporters, slog setup)
 ├── generate_protos.sh                # Proto compilation script
-├── run_server.sh                     # Launch script with OTEL_SERVICE_NAME
-├── run_client.sh                     # Launch script with OTEL_SERVICE_NAME
+├── run_server.sh                     # Launch script with OTEL_* env vars
+├── run_client.sh                     # Launch script with OTEL_* env vars
 ├── go.mod
 ├── go.sum
 └── README.md
@@ -79,16 +78,16 @@ Requires **Go 1.21+** (for `log/slog`). Dependencies are managed by Go modules (
 
 | Package | Why |
 |---|---|
-| `go.opentelemetry.io/otel` | The public API surface: `otel.SetTracerProvider()`, propagators, `trace.SpanContextFromContext()`. By itself it delegates to no-op implementations until an SDK is registered. |
+| `go.opentelemetry.io/otel` | The public API surface: `otel.SetTracerProvider()`, `otel.SetTextMapPropagator()`. By itself it delegates to no-op implementations until an SDK is registered. |
 | `go.opentelemetry.io/otel/sdk` | The concrete SDK: `TracerProvider`, `BatchSpanProcessor`. This is what actually records spans and exports them. |
 | `go.opentelemetry.io/otel/sdk/log` | The Logs SDK: `LoggerProvider`, `BatchProcessor`. Records OTel log records and exports them. |
-| `go.opentelemetry.io/otel/trace` | The trace API types: `Tracer`, `Span`, `SpanContext`. Used to extract trace context from `context.Context`. |
 
-### Exporters
+### Env-Var-Driven Configuration
 
 | Package | Why |
 |---|---|
-| `go.opentelemetry.io/contrib/exporters/autoexport` | Reads `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` env vars and returns the matching exporter. Supports `"console"` (stdout JSON), `"otlp"` (send to a collector), and `"none"` (no-op). This is the Go equivalent of Python's distro-based env var configuration for exporters. |
+| `go.opentelemetry.io/contrib/exporters/autoexport` | Reads `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` env vars and returns the matching exporter. Supports `"console"` (stdout JSON), `"otlp"` (send to a collector), and `"none"` (no-op). |
+| `go.opentelemetry.io/contrib/propagators/autoprop` | Reads `OTEL_PROPAGATORS` env var and returns the matching composite propagator. Defaults to `tracecontext,baggage`. Also supports `b3`, `b3multi`, `jaeger`, `xray`, `ottrace`, and `none`. |
 
 ### Instrumentation
 
@@ -120,13 +119,11 @@ conn, err := grpc.NewClient("localhost:50051",
 
 `telemetry.Init()` does the following:
 
-1. **Reads `OTEL_SERVICE_NAME`** from the environment and creates a `resource.Resource`.
-2. **Creates a `TracerProvider`** with the exporter selected by `OTEL_TRACES_EXPORTER` (via `autoexport`) and a `BatchSpanProcessor` (1ms timeout for instant console output).
-3. **Creates a `LoggerProvider`** with the exporter selected by `OTEL_LOGS_EXPORTER` (via `autoexport`) and a `BatchProcessor` (1ms timeout).
-4. **Registers global providers and propagators** via `otel.SetTracerProvider()` and `otel.SetTextMapPropagator()`.
-5. **Sets up a fan-out `slog` handler** that sends each log record to both:
-   - A `traceContextHandler` wrapping `slog.TextHandler(os.Stderr)` — adds `trace_id`/`span_id` to stderr output
-   - An `otelslog.Handler` — bridges to the OTel Logs pipeline for JSON export to stdout
+1. **Creates a `resource.Resource`** via `resource.WithFromEnv()`, which reads `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from the environment.
+2. **Creates a `TracerProvider`** with the exporter selected by `OTEL_TRACES_EXPORTER` (via `autoexport`) and a `BatchSpanProcessor`.
+3. **Creates a `LoggerProvider`** with the exporter selected by `OTEL_LOGS_EXPORTER` (via `autoexport`) and a `BatchProcessor`.
+4. **Sets the global propagator** via `autoprop.NewTextMapPropagator()`, which reads `OTEL_PROPAGATORS`.
+5. **Bridges `slog` to the OTel Logs pipeline** — sets `otelslog.Handler` as the default slog handler.
 6. **Returns a shutdown function** that flushes and stops both providers.
 
 ### Why Stats Handlers, Not Interceptors
@@ -136,17 +133,6 @@ The `otelgrpc` package offers both interceptors and stats handlers. We use stats
 - The interceptors (`UnaryServerInterceptor`, `UnaryClientInterceptor`) are **deprecated** in favor of stats handlers.
 - Stats handlers cover both unary and streaming RPCs with a single registration point.
 - Stats handlers are the recommended approach in the [otelgrpc documentation](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc).
-
-### The Fan-Out slog Handler
-
-Go's `log/slog` doesn't have a built-in multi-handler. We implement a simple `fanOutHandler` that delegates to multiple `slog.Handler`s. Each log record is cloned via `Record.Clone()` before dispatch to prevent data races.
-
-The two targets serve different purposes:
-
-| Handler | Output | Purpose |
-|---|---|---|
-| `traceContextHandler` → `TextHandler(stderr)` | Human-readable text with `trace_id`/`span_id` | Developer console reading |
-| `otelslog.Handler` → OTel `LoggerProvider` | Structured JSON OTel log records to stdout | Machine consumption / observability backends |
 
 ### Context Passing Is Explicit
 
@@ -163,15 +149,14 @@ If you use `slog.Info()` (without context), the log record will have zero trace_
 
 ## Environment Variables
 
-The launch scripts set these environment variables. `telemetry.Init()` reads `OTEL_SERVICE_NAME` directly and uses the `autoexport` package to resolve `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` into concrete exporters.
+The launch scripts set these environment variables. All are read by the Go code via `resource.WithFromEnv()`, `autoexport`, and `autoprop`.
 
-| Variable | Value | Effect in Go |
+| Variable | Value | Read by |
 |---|---|---|
-| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | **Read from env.** Sets `service.name` on the resource attached to all spans and log records. |
-| `OTEL_TRACES_EXPORTER` | `console` | **Read by `autoexport`.** `"console"` → `stdouttrace` (JSON to stdout). Also supports `"otlp"` and `"none"`. |
-| `OTEL_LOGS_EXPORTER` | `console` | **Read by `autoexport`.** `"console"` → `stdoutlog` (JSON to stdout). Also supports `"otlp"` and `"none"`. |
-| `OTEL_METRICS_EXPORTER` | `none` | Not read. No metric provider is configured. |
-| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Not read. Propagators are set programmatically. |
+| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `resource.WithFromEnv()` — sets `service.name` on the resource attached to all spans and log records. |
+| `OTEL_TRACES_EXPORTER` | `console` | `autoexport.NewSpanExporter()` — `"console"` exports spans as JSON to stdout. Also supports `"otlp"` and `"none"`. |
+| `OTEL_LOGS_EXPORTER` | `console` | `autoexport.NewLogExporter()` — `"console"` exports log records as JSON to stdout. Also supports `"otlp"` and `"none"`. |
+| `OTEL_PROPAGATORS` | `tracecontext,baggage` | `autoprop.NewTextMapPropagator()` — selects W3C Trace Context + Baggage propagators. Also supports `b3`, `jaeger`, `xray`, etc. |
 
 ---
 
@@ -200,10 +185,7 @@ The `otelgrpc.NewServerHandler()` stats handler intercepts the incoming RPC. It:
 
 ### 3. Log correlation happens via explicit context passing
 
-Inside the `SayHello` handler, the server span is in the context. When `slog.InfoContext(ctx, ...)` is called:
-
-- The `traceContextHandler` extracts `TraceID` and `SpanID` from the context and adds them as slog attributes — they appear in stderr output
-- The `otelslog.Handler` bridges the record into an OTel `LogRecord` with `TraceID` and `SpanID` fields — it appears as JSON in stdout
+Inside the `SayHello` handler, the server span is in the context. When `slog.InfoContext(ctx, ...)` is called, the `otelslog.Handler` bridges the record into an OTel `LogRecord` with `TraceID` and `SpanID` fields, which gets exported as JSON to stdout.
 
 ### 4. Verification: matching IDs
 
@@ -220,9 +202,6 @@ Parent:    zero (root span)
 SpanKind:  2 (SERVER)
 Parent:    "d0fe6574fa40d555"                       # matches client SpanID
 
-# Server log line (stderr):
-trace_id=5061a996070a831e1a8ef895f8aa4268 span_id=fc7fba7097ddcd66
-
 # Server OTel log record (stdout JSON):
 "TraceID": "5061a996070a831e1a8ef895f8aa4268"       # same trace as both spans
 "SpanID":  "fc7fba7097ddcd66"                        # matches server span
@@ -230,17 +209,9 @@ trace_id=5061a996070a831e1a8ef895f8aa4268 span_id=fc7fba7097ddcd66
 
 ---
 
-## Three Kinds of Telemetry Output
+## Two Kinds of Telemetry Output
 
-### 1. slog to stderr (structured text with trace context)
-
-```
-time=2026-02-21T09:38:02.289Z level=INFO msg="Received request" name=World trace_id=5061a996070a831e1a8ef895f8aa4268 span_id=fc7fba7097ddcd66
-```
-
-Produced by: `traceContextHandler` wrapping `slog.TextHandler(os.Stderr)`
-
-### 2. OTel spans to stdout (JSON)
+### 1. OTel spans to stdout (JSON)
 
 ```json
 {
@@ -264,9 +235,9 @@ Produced by: `traceContextHandler` wrapping `slog.TextHandler(os.Stderr)`
 }
 ```
 
-Produced by: `stdouttrace.Exporter` via `BatchSpanProcessor`
+Produced by: `autoexport` console exporter via `BatchSpanProcessor`
 
-### 3. OTel log records to stdout (JSON)
+### 2. OTel log records to stdout (JSON)
 
 ```json
 {
@@ -280,7 +251,7 @@ Produced by: `stdouttrace.Exporter` via `BatchSpanProcessor`
 }
 ```
 
-Produced by: `otelslog.Handler` → `stdoutlog.Exporter` via `BatchProcessor`
+Produced by: `otelslog.Handler` → `autoexport` console exporter via `BatchProcessor`
 
 ---
 
@@ -291,8 +262,8 @@ Produced by: `otelslog.Handler` → `stdoutlog.Exporter` via `BatchProcessor`
 | **Initialization** | `initialize()` — discovers and activates instrumentors + SDK via entry points and env vars | Explicit: create providers, set globals, pass stats handlers to gRPC constructors |
 | **gRPC instrumentation** | Monkey-patching via `GrpcInstrumentorServer/Client` | Stats handlers: `otelgrpc.NewServerHandler()`/`NewClientHandler()` passed to `grpc.NewServer()`/`grpc.NewClient()` |
 | **Log correlation** | Automatic via `LoggingInstrumentor` patching `LogRecord` | Explicit: `slog.InfoContext(ctx, ...)` — must pass context manually |
-| **OTel log bridge** | `LoggingHandler` attached to root logger by configurator | `otelslog.Handler` wired into a fan-out `slog.Handler` |
-| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` to build entire SDK | `OTEL_SERVICE_NAME`, `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER` read from env (via `autoexport`); propagators are programmatic |
+| **OTel log bridge** | `LoggingHandler` attached to root logger by configurator | `otelslog.Handler` set as default slog handler |
+| **Env var configuration** | `OTEL_*` vars read by `OpenTelemetryConfigurator` to build entire SDK | `OTEL_SERVICE_NAME`, `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_PROPAGATORS` read via `resource.WithFromEnv()`, `autoexport`, and `autoprop` |
 | **Import order** | Critical: `initialize()` must come before `import grpc` | Not applicable: no monkey-patching |
 | **Thread-local context** | Yes (`contextvars`): active span is implicitly available | No: context must be explicitly passed through `context.Context` |
 | **Proto file** | No `go_package` option needed | Requires `option go_package` (proto file copied, not symlinked) |
@@ -317,7 +288,7 @@ Go's stdlib structured logger (available since Go 1.21). It supports `context.Co
 
 ### 4. Batch processor timeout set to 1ms
 
-Same reasoning as the Python project's `OTEL_BSP_SCHEDULE_DELAY=1`: in development, you want spans and log records to appear immediately after each RPC, not up to 5 seconds later. In production, use the default (5s) to amortize export overhead.
+Same reasoning as the Python project's `OTEL_BSP_SCHEDULE_DELAY=1`: in development, you want spans and log records to appear immediately after each RPC, not up to 5 seconds later. The Go SDK does not read `OTEL_BSP_SCHEDULE_DELAY`, so this is set programmatically. In production, use the default (5s) to amortize export overhead.
 
 ---
 
@@ -338,7 +309,3 @@ If the process exits without calling the shutdown function returned by `telemetr
 ### 4. No auto-discovery of instrumentors
 
 Unlike Python's `initialize()` which scans entry points to find all installed instrumentors, Go requires you to explicitly pass stats handlers (or interceptors) to each gRPC server/client. If you add a new gRPC service and forget to add the stats handler, that service produces no spans.
-
-### 5. The OTel log records and slog stderr output are independent
-
-These are two separate outputs from the fan-out handler. The stderr text handler adds `trace_id`/`span_id` as slog attributes (for human reading). The `otelslog` handler bridges to the OTel Logs pipeline (for machine consumption). They happen to contain the same trace context, but through different mechanisms.
