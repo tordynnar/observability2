@@ -40,6 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
-    guard.shutdown();
+    drop(guard);
     Ok(())
 }

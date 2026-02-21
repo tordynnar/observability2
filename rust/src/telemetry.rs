@@ -7,15 +7,14 @@ use opentelemetry_sdk::Resource;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// Guard that flushes and shuts down OTel providers when dropped or explicitly shut down.
+/// Guard that shuts down OTel providers on drop.
 pub struct TelemetryGuard {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
 }
 
-impl TelemetryGuard {
-    /// Flush all pending spans and log records, then shut down providers.
-    pub fn shutdown(self) {
+impl Drop for TelemetryGuard {
+    fn drop(&mut self) {
         if let Err(e) = self.tracer_provider.shutdown() {
             eprintln!("Error shutting down tracer provider: {e}");
         }
@@ -25,58 +24,36 @@ impl TelemetryGuard {
     }
 }
 
-/// Initialize OpenTelemetry tracing, logging, and the `tracing` subscriber.
-///
-/// Sets up:
-/// - A `SdkTracerProvider` with a stdout `SpanExporter` (batch delay via `OTEL_BSP_SCHEDULE_DELAY`)
-/// - A `SdkLoggerProvider` with a stdout `LogExporter` (batch delay via `OTEL_BLRP_SCHEDULE_DELAY`)
-/// - W3C TraceContext propagator
-/// - A layered `tracing` subscriber:
-///   - `fmt::Layer` for human-readable logs on stderr
-///   - `OpenTelemetryLayer` bridging tracing spans → OTel spans
-///   - `OpenTelemetryTracingBridge` bridging tracing events → OTel log records
+/// Initialize OpenTelemetry tracing + logging with stdout exporters, and set up
+/// the `tracing` subscriber with fmt, OTel trace, and OTel log bridge layers.
 pub fn init() -> TelemetryGuard {
-    // Resource — reads OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES from the environment
-    // via the built-in SdkProvidedResourceDetector and EnvResourceDetector.
     let resource = Resource::builder().build();
 
     // Trace provider — stdout exporter with batch processor.
-    // Batch delay is controlled by OTEL_BSP_SCHEDULE_DELAY env var (set to 1ms in run scripts).
-    let span_exporter = opentelemetry_stdout::SpanExporter::default();
+    // Batch delay is controlled by OTEL_BSP_SCHEDULE_DELAY (set to 1ms in run scripts).
     let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(span_exporter)
+        .with_batch_exporter(opentelemetry_stdout::SpanExporter::default())
         .with_resource(resource.clone())
         .build();
-
-    // Get a tracer for the tracing-opentelemetry layer before setting the global provider.
     let tracer = tracer_provider.tracer("app");
     global::set_tracer_provider(tracer_provider.clone());
 
     // Log provider — stdout exporter with batch processor.
-    // Batch delay is controlled by OTEL_BLRP_SCHEDULE_DELAY env var (set to 1ms in run scripts).
-    let log_exporter = opentelemetry_stdout::LogExporter::default();
+    // Batch delay is controlled by OTEL_BLRP_SCHEDULE_DELAY (set to 1ms in run scripts).
     let logger_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(log_exporter)
+        .with_batch_exporter(opentelemetry_stdout::LogExporter::default())
         .with_resource(resource)
         .build();
 
-    // W3C TraceContext propagator.
     global::set_text_map_propagator(TraceContextPropagator::new());
-
-    // Layered tracing subscriber:
-    // 1. fmt layer — human-readable output on stderr
-    // 2. OpenTelemetryLayer — bridges tracing spans to OTel spans
-    // 3. OpenTelemetryTracingBridge — bridges tracing events to OTel log records
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-    let otel_log_layer =
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider);
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(fmt_layer)
-        .with(otel_trace_layer)
-        .with(otel_log_layer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+            &logger_provider,
+        ))
         .init();
 
     TelemetryGuard {

@@ -25,6 +25,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(message = %response.into_inner().message, "Greeter response");
 
-    guard.shutdown();
+    drop(guard);
     Ok(())
 }
