@@ -7,9 +7,6 @@ export OTEL_SERVICE_NAME="grpc-server"
 # Supported values: "console" (stdout JSON), "otlp", "none".
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
-
-# Not read by the Go code — set for documentation parity with the Python project.
-export OTEL_METRICS_EXPORTER="none"
 export OTEL_PROPAGATORS="tracecontext,baggage"
 
 exec go run ./cmd/server
