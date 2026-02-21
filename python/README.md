@@ -13,7 +13,7 @@ A gRPC `Greeter` service with a single `SayHello` RPC. A client sends a request;
 ## Project Structure
 
 ```
-observability2/
+python/
 ├── protos/
 │   └── helloworld.proto           # gRPC service definition
 ├── server.py                      # Async gRPC server
@@ -30,6 +30,8 @@ observability2/
 ## Quick Start
 
 ```bash
+cd python
+
 # Install dependencies
 uv sync --group dev
 

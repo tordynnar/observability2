@@ -1,6 +1,6 @@
-.venv/
-__pycache__/
-*.pyc
-helloworld_pb2.py
-helloworld_pb2_grpc.py
-helloworld_pb2.pyi
+python/.venv/
+python/__pycache__/
+python/*.pyc
+python/helloworld_pb2.py
+python/helloworld_pb2_grpc.py
+python/helloworld_pb2.pyi
