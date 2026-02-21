@@ -100,7 +100,7 @@ telemetry::inject_trace_context(request.metadata_mut());
 
 `telemetry::init()` does the following:
 
-1. **Creates a `Resource`** by reading `OTEL_SERVICE_NAME` from the environment.
+1. **Creates a `Resource`** via `Resource::builder().build()`, which includes the built-in `SdkProvidedResourceDetector` and `EnvResourceDetector` — these read `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically.
 2. **Creates a `SdkTracerProvider`** with a `BatchSpanProcessor` wrapping a stdout `SpanExporter`.
 3. **Creates a `SdkLoggerProvider`** with a batch exporter wrapping a stdout `LogExporter`.
 4. **Sets the global propagator** to W3C `TraceContextPropagator`.
@@ -153,7 +153,7 @@ The launch scripts set these environment variables.
 
 | Variable | Value | Read by |
 |---|---|---|
-| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `telemetry::init()` — sets `service.name` on the resource attached to all spans and log records. |
+| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `Resource::builder()` includes `SdkProvidedResourceDetector`, which reads this env var automatically and sets `service.name` on the resource attached to all spans and log records. Falls back to `OTEL_RESOURCE_ATTRIBUTES`, then `"unknown_service"`. |
 | `OTEL_TRACES_EXPORTER` | `console` | Not read by code (stdout exporter is hardcoded). Set for documentation consistency with Go/Python. |
 | `OTEL_LOGS_EXPORTER` | `console` | Not read by code (stdout exporter is hardcoded). Set for documentation consistency with Go/Python. |
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | Not read by code (W3C TraceContext is hardcoded). Set for documentation consistency. |

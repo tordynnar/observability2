@@ -40,12 +40,9 @@ impl TelemetryGuard {
 ///   - `OpenTelemetryLayer` bridging tracing spans → OTel spans
 ///   - `OpenTelemetryTracingBridge` bridging tracing events → OTel log records
 pub fn init() -> TelemetryGuard {
-    // Resource — reads OTEL_SERVICE_NAME from the environment.
-    let service_name =
-        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "unknown".to_string());
-    let resource = Resource::builder()
-        .with_service_name(service_name)
-        .build();
+    // Resource — reads OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES from the environment
+    // via the built-in SdkProvidedResourceDetector and EnvResourceDetector.
+    let resource = Resource::builder().build();
 
     // Trace provider — stdout exporter with batch processor.
     // Batch delay is controlled by OTEL_BSP_SCHEDULE_DELAY env var (set to 1ms in run scripts).
