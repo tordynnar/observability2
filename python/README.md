@@ -163,6 +163,57 @@ The launch scripts (`run_server.sh`, `run_client.sh`) set these environment vari
 
 ---
 
+## Exporting via OTLP Instead of Console
+
+The `console` exporter is useful for seeing raw telemetry during development, but in a real setup you'll send telemetry to a collector or observability backend via OTLP (OpenTelemetry Protocol). Since `opentelemetry-distro` already includes `opentelemetry-exporter-otlp` as a dependency, no additional packages are needed — just change the environment variables.
+
+### Minimal Change
+
+In your launch scripts (`run_server.sh`, `run_client.sh`), replace:
+
+```bash
+export OTEL_TRACES_EXPORTER="console"
+export OTEL_LOGS_EXPORTER="console"
+```
+
+with:
+
+```bash
+export OTEL_TRACES_EXPORTER="otlp"
+export OTEL_LOGS_EXPORTER="otlp"
+```
+
+By default, the OTLP exporter sends telemetry via gRPC to `http://localhost:4317`. If you have an OpenTelemetry Collector or a compatible backend (Jaeger, Grafana Tempo, etc.) listening there, spans and log records will start flowing immediately.
+
+### OTLP Configuration Variables
+
+| Variable | Default | What It Does |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | The collector endpoint. Set this to point at your collector or backend. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Protocol to use. `grpc` sends to port 4317; `http/protobuf` sends to port 4318. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(none)* | Comma-separated `key=value` pairs sent as headers on every export request. Used for authentication tokens (e.g., `x-api-key=secret`). |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | *(none)* | Path to a TLS certificate file for the collector connection. |
+
+You can also set signal-specific overrides like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` if traces and logs go to different destinations.
+
+### Example: Sending to a Local Collector
+
+```bash
+export OTEL_SERVICE_NAME="grpc-server"
+export OTEL_TRACES_EXPORTER="otlp"
+export OTEL_LOGS_EXPORTER="otlp"
+export OTEL_METRICS_EXPORTER="none"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+export OTEL_PROPAGATORS="tracecontext,baggage"
+export OTEL_PYTHON_LOG_CORRELATION="true"
+export OTEL_PYTHON_LOG_LEVEL="info"
+export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
+```
+
+Note that `OTEL_PYTHON_LOG_CORRELATION=true` still works with OTLP — it controls the stderr log format (injecting `trace_id`/`span_id` into Python `logging` output), which is independent of where OTel spans and log records are exported.
+
+---
+
 ## How Distributed Tracing Works Across gRPC
 
 Here's the exact flow when the client calls `SayHello`:

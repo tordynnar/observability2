@@ -160,6 +160,54 @@ The launch scripts set these environment variables. All are read by the Go code 
 
 ---
 
+## Exporting via OTLP Instead of Console
+
+The `console` exporter is useful for seeing raw telemetry during development, but in a real setup you'll send telemetry to a collector or observability backend via OTLP (OpenTelemetry Protocol). The `autoexport` package already includes OTLP exporter support (both gRPC and HTTP variants are in `go.mod` as indirect dependencies), so no additional packages are needed — just change the environment variables.
+
+### Minimal Change
+
+In your launch scripts (`run_server.sh`, `run_client.sh`), replace:
+
+```bash
+export OTEL_TRACES_EXPORTER="console"
+export OTEL_LOGS_EXPORTER="console"
+```
+
+with:
+
+```bash
+export OTEL_TRACES_EXPORTER="otlp"
+export OTEL_LOGS_EXPORTER="otlp"
+```
+
+By default, the OTLP exporter sends telemetry to `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP). If you have an OpenTelemetry Collector or a compatible backend (Jaeger, Grafana Tempo, etc.) listening there, spans and log records will start flowing immediately.
+
+### OTLP Configuration Variables
+
+| Variable | Default | What It Does |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | The collector endpoint. Set this to point at your collector or backend. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Protocol to use. `grpc` sends to port 4317; `http/protobuf` sends to port 4318. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(none)* | Comma-separated `key=value` pairs sent as headers on every export request. Used for authentication tokens (e.g., `x-api-key=secret`). |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | *(none)* | Path to a TLS certificate file for the collector connection. |
+
+You can also set signal-specific overrides like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` if traces and logs go to different destinations.
+
+### Example: Sending to a Local Collector
+
+```bash
+export OTEL_SERVICE_NAME="grpc-server"
+export OTEL_TRACES_EXPORTER="otlp"
+export OTEL_LOGS_EXPORTER="otlp"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
+export OTEL_PROPAGATORS="tracecontext,baggage"
+```
+
+No code changes are needed — `autoexport.NewSpanExporter()` and `autoexport.NewLogExporter()` in `telemetry.go` already read `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` to select the exporter at runtime.
+
+---
+
 ## How Distributed Tracing Works Across gRPC
 
 Here's the exact flow when the client calls `SayHello`:
