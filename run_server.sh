@@ -12,4 +12,4 @@ export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec .venv/bin/python server.py
+exec uv run python server.py

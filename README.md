@@ -21,7 +21,7 @@ observability2/
 ├── run_server.sh                  # Launch script with OTEL_* env vars
 ├── run_client.sh                  # Launch script with OTEL_* env vars
 ├── generate_protos.sh             # Proto compilation script
-├── requirements.txt               # Python dependencies
+├── pyproject.toml                 # Python project config & dependencies
 ├── helloworld_pb2.py              # (generated)
 ├── helloworld_pb2_grpc.py         # (generated)
 └── helloworld_pb2.pyi             # (generated)
@@ -31,8 +31,7 @@ observability2/
 
 ```bash
 # Install dependencies
-uv venv
-uv pip install -r requirements.txt
+uv sync --group dev
 
 # Generate protobuf code
 chmod +x generate_protos.sh run_server.sh run_client.sh
@@ -254,7 +253,7 @@ Controlled by: `OTEL_LOGS_EXPORTER=console` + `OTEL_PYTHON_LOGGING_AUTO_INSTRUME
 
 ## Package Roles
 
-Each package in `requirements.txt` has a specific job:
+Each package in `pyproject.toml` has a specific job:
 
 | Package | Role |
 |---|---|
