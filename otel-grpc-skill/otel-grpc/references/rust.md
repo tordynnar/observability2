@@ -36,6 +36,10 @@ tracing-opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.31"
 tonic-tracing-opentelemetry = { version = "0.32", features = ["tracing_level_info"] }
 tower = "0.5"
+
+[build-dependencies]
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
 ```
 
 ---
@@ -271,13 +275,13 @@ This requires `protoc` to be installed. On macOS: `brew install protobuf`. On De
 
 ## Launch Scripts
 
-### run_server.sh
+Both `run_server.sh` and `run_client.sh` follow the same pattern, differing only in `OTEL_SERVICE_NAME` and the `--bin` target:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-export OTEL_SERVICE_NAME="grpc-server"
+export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
 export OTEL_PROPAGATORS="tracecontext,baggage"
@@ -285,24 +289,7 @@ export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 export RUST_LOG="info"
 
-exec cargo run --bin server
-```
-
-### run_client.sh
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-export OTEL_SERVICE_NAME="grpc-client"
-export OTEL_TRACES_EXPORTER="console"
-export OTEL_LOGS_EXPORTER="console"
-export OTEL_PROPAGATORS="tracecontext,baggage"
-export OTEL_BSP_SCHEDULE_DELAY="1"
-export OTEL_BLRP_SCHEDULE_DELAY="1"
-export RUST_LOG="info"
-
-exec cargo run --bin client
+exec cargo run --bin server  # or --bin client
 ```
 
 ---
@@ -338,8 +325,6 @@ Provides tower middleware that auto-creates spans and propagates trace context. 
 ---
 
 ## Testing That It Works
-
-Start the server and client (`cd rust && ./run_server.sh` in one terminal, `./run_client.sh` in another). First run triggers `cargo build`. Then follow the verification steps in SKILL.md (trace linkage, log correlation, span attributes).
 
 Rust-specific output format -- **stderr** (human-readable via `fmt::Layer`):
 ```
