@@ -16,8 +16,6 @@
 
 ## Dependencies
 
-Go 1.21+ (for `log/slog`). Dependencies managed by Go modules (`go.mod`).
-
 ### Direct Dependencies
 
 ```
