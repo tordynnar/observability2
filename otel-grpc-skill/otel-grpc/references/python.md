@@ -16,20 +16,17 @@
 
 ## Dependencies
 
-Python 3.11+. Use `uv` for dependency management.
-
 ```toml
 # pyproject.toml
 [project]
-requires-python = ">= 3.11"
 dependencies = [
     "grpcio>=1.68.0",
-    "opentelemetry-api>=1.29.0",
-    "opentelemetry-sdk>=1.29.0",
-    "opentelemetry-instrumentation>=0.50b0",
-    "opentelemetry-instrumentation-grpc>=0.50b0",
-    "opentelemetry-instrumentation-logging>=0.50b0",
-    "opentelemetry-distro>=0.50b0",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-instrumentation",
+    "opentelemetry-instrumentation-grpc",
+    "opentelemetry-instrumentation-logging",
+    "opentelemetry-distro",
 ]
 
 [dependency-groups]
@@ -60,8 +57,6 @@ When regenerating proto bindings:
 1. Check `GRPC_GENERATED_VERSION` in all `*_pb2_grpc.py` files.
 2. Find the highest version among them.
 3. Update `pyproject.toml` so the lower bounds for `grpcio` (and `grpcio-tools` in dev dependencies) are `>=` that highest version.
-
-Install: `uv sync --group dev`
 
 ---
 
@@ -215,7 +210,7 @@ export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec uv run python server.py
+exec python server.py
 ```
 
 ### run_client.sh
@@ -235,7 +230,7 @@ export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec uv run python client.py
+exec python client.py
 ```
 
 ---
@@ -307,11 +302,10 @@ Both server and client use `grpc.aio` (the async API), the recommended approach 
 ### Step 1: Start the server and client
 
 ```bash
-cd python
-uv sync --group dev
-./generate_protos.sh    # only needed once
-./run_server.sh         # terminal 1
-./run_client.sh         # terminal 2
+pip install -e ".[dev]"     # install dependencies
+./generate_protos.sh        # only needed once
+./run_server.sh             # terminal 1
+./run_client.sh             # terminal 2
 ```
 
 ### Step 2: Verify three types of output
@@ -370,11 +364,7 @@ The `trace_id` in the server's stderr log line should match the `trace_id` in bo
 
 **Cause:** `opentelemetry-distro` is not installed. Without it, `initialize()` discovers and activates all instrumentors (monkey-patching happens), but no SDK is configured. Every span is a `NonRecordingSpan` with `trace_id=0`.
 
-**Fix:** Add `opentelemetry-distro>=0.50b0` to your dependencies and reinstall:
-```bash
-uv add opentelemetry-distro
-uv sync
-```
+**Fix:** Add `opentelemetry-distro` to your dependencies and reinstall.
 
 ### 2. No spans appear, but logs work
 
