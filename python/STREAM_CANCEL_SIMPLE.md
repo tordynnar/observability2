@@ -5,15 +5,11 @@
 OpenTelemetry instrumentation wraps gRPC streams in an async generator, hiding the `.cancel()` method. Use this helper:
 
 ```python
-import types
-
 async def cancel_stream(stream):
     if hasattr(stream, "cancel"):
         stream.cancel()
-    elif isinstance(stream, types.AsyncGeneratorType):
-        await stream.aclose()
     else:
-        raise TypeError(f"Don't know how to cancel {type(stream)}")
+        await stream.aclose()
 ```
 
 Usage:
