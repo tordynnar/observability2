@@ -4,7 +4,7 @@
 
 1. [Dependencies](#dependencies)
 2. [How It Works](#how-it-works)
-3. [Server and Client Code](#server-and-client-code)
+3. [Example Code](#example-code)
 4. [Launch Scripts](#launch-scripts)
 5. [Environment Variables](#environment-variables)
 6. [Testing That It Works](#testing-that-it-works)
@@ -104,11 +104,10 @@ Enable both: stderr for humans, OTel log records for machines.
 
 ---
 
-## Server and Client Code
+## Example Code
 
 ```python
 from opentelemetry.instrumentation.auto_instrumentation import initialize
-
 initialize()
 
 import asyncio
@@ -120,9 +119,6 @@ import helloworld_pb2
 import helloworld_pb2_grpc
 
 logger = logging.getLogger(__name__)
-
-
-# --- server.py ---
 
 class GreeterServicer(helloworld_pb2_grpc.GreeterServicer):
     async def SayHello(self, request, context):
@@ -140,20 +136,16 @@ async def serve():
     await server.wait_for_termination()
 
 
-# --- client.py ---
-
-async def run():
+async def client():
     async with grpc.aio.insecure_channel("localhost:50051") as channel:
         stub = helloworld_pb2_grpc.GreeterStub(channel)
         response = await stub.SayHello(helloworld_pb2.HelloRequest(name="World"))
         logger.info("Greeter response: %s", response.message)
 
 
-# --- both ---
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(serve())  # or asyncio.run(run())
+    asyncio.run(serve())  # or asyncio.run(client())
 ```
 
 Key points:
@@ -165,9 +157,6 @@ Key points:
 ## Launch Scripts
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
 export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
@@ -179,7 +168,7 @@ export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec python server.py  # or client.py
+exec python example.py
 ```
 
 ---
