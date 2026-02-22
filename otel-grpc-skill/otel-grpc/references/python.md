@@ -51,6 +51,16 @@ dev = [
 | `opentelemetry-instrumentation-logging` | Registers `LoggingInstrumentor`. Patches Python's `logging` to inject `otelTraceID`, `otelSpanID`, `otelServiceName` into every `LogRecord`. |
 | `opentelemetry-distro` | **The most subtle dependency.** Registers `OpenTelemetryConfigurator` which reads `OTEL_*` env vars and builds the SDK. Without it, all instrumentors still activate (monkey-patching happens), but no SDK is configured -- every span is a `NonRecordingSpan` with `trace_id=0`, nothing is exported. See [Troubleshooting](#1-all-trace-ids-are-zero). |
 
+### gRPC version constraints
+
+The lower bounds for `grpcio` and `grpcio-tools` in `pyproject.toml` must match the version of `grpcio-tools` used to generate the proto bindings. The generated gRPC stub files (`*_pb2_grpc.py`) contain a `GRPC_GENERATED_VERSION` constant (e.g., `'1.78.1'`). At import time, the stub compares the installed `grpc.__version__` against this value and raises a `RuntimeError` if the installed version is lower.
+
+When regenerating proto bindings:
+
+1. Check `GRPC_GENERATED_VERSION` in all `*_pb2_grpc.py` files.
+2. Find the highest version among them.
+3. Update `pyproject.toml` so the lower bounds for `grpcio` (and `grpcio-tools` in dev dependencies) are `>=` that highest version.
+
 Install: `uv sync --group dev`
 
 ---
