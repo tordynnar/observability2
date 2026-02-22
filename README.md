@@ -4,11 +4,11 @@ A Claude Code skill for adding OpenTelemetry distributed tracing and correlated 
 
 ## Installation
 
-Copy the `otel-grpc-skill/otel-grpc/` directory into your project's `.claude/skills/` directory:
+Copy the `skills/otel-grpc/` directory into your project's `.claude/skills/` directory:
 
 ```bash
 mkdir -p .claude/skills
-cp -r path/to/otel-grpc-skill/otel-grpc .claude/skills/
+cp -r path/to/skills/otel-grpc .claude/skills/
 ```
 
 The result should look like:
