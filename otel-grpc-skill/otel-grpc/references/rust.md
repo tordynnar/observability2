@@ -5,14 +5,13 @@
 1. [Dependencies](#dependencies)
 2. [How It Works](#how-it-works)
 3. [Telemetry Initialization](#telemetry-initialization)
-4. [Server Code](#server-code)
-5. [Client Code](#client-code)
-6. [Proto Compilation](#proto-compilation)
-7. [Launch Scripts](#launch-scripts)
-8. [Environment Variables](#environment-variables)
-9. [Design Decisions](#design-decisions)
-10. [Testing That It Works](#testing-that-it-works)
-11. [Troubleshooting](#troubleshooting)
+4. [Example Code](#example-code)
+5. [Proto Compilation](#proto-compilation)
+6. [Launch Scripts](#launch-scripts)
+7. [Environment Variables](#environment-variables)
+8. [Design Decisions](#design-decisions)
+9. [Testing That It Works](#testing-that-it-works)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -148,14 +147,14 @@ pub fn init() -> TelemetryGuard {
 
 ---
 
-## Server Code
+## Example Code
 
 ```rust
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
+use tower::ServiceBuilder;
 
-use example::pb;
-use example::telemetry;
+use example::{pb, telemetry};
 
 struct GreeterService;
 
@@ -180,10 +179,7 @@ async fn shutdown_signal() {
     tracing::info!("Shutting down server");
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let guard = telemetry::init();
-
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::]:50051".parse()?;
     tracing::info!("Server starting on port 50051");
 
@@ -193,30 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
-    drop(guard);
     Ok(())
 }
-```
 
-Key points:
-- **`OtelGrpcLayer::default()`** -- server-side tower middleware. Extracts `traceparent` from incoming metadata, creates a server span with RPC attributes, enters the span for the handler's duration.
-- **`drop(guard)`** -- explicit flush at the end of `main()`. Critical for ensuring all buffered telemetry is exported before process exit.
-
----
-
-## Client Code
-
-```rust
-use tonic::Request;
-use tower::ServiceBuilder;
-
-use example::pb;
-use example::telemetry;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let guard = telemetry::init();
-
+async fn call() -> Result<(), Box<dyn std::error::Error>> {
     let channel = tonic::transport::Channel::from_static("http://localhost:50051")
         .connect()
         .await?;
@@ -234,13 +210,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(message = %response.into_inner().message, "Greeter response");
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let guard = telemetry::init();
+
+    serve().await?; // or call().await?
+
     drop(guard);
     Ok(())
 }
 ```
 
 Key points:
+- **`OtelGrpcLayer::default()`** -- server-side tower middleware. Extracts `traceparent` from incoming metadata, creates a server span with RPC attributes, enters the span for the handler's duration.
 - **`ServiceBuilder::new().layer(OtelGrpcLayer).service(channel)`** -- wraps the raw tonic channel with client-side OTel middleware. Creates client spans and injects `traceparent`.
+- **`drop(guard)`** -- explicit flush at the end of `main()`. Critical for ensuring all buffered telemetry is exported before process exit.
 
 ---
 
@@ -275,13 +262,8 @@ This requires `protoc` to be installed. On macOS: `brew install protobuf`. On De
 
 ## Launch Scripts
 
-Both `run_server.sh` and `run_client.sh` follow the same pattern, differing only in `OTEL_SERVICE_NAME` and the `--bin` target:
-
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
+export OTEL_SERVICE_NAME="example1"  # or "example2"
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
 export OTEL_PROPAGATORS="tracecontext,baggage"
@@ -289,7 +271,7 @@ export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 export RUST_LOG="info"
 
-exec cargo run --bin server  # or --bin client
+cargo run
 ```
 
 ---
