@@ -4,13 +4,12 @@
 
 1. [Dependencies](#dependencies)
 2. [How It Works](#how-it-works)
-3. [Server Code](#server-code)
-4. [Client Code](#client-code)
-5. [Launch Scripts](#launch-scripts)
-6. [Environment Variables](#environment-variables)
-7. [Design Decisions](#design-decisions)
-8. [Testing That It Works](#testing-that-it-works)
-9. [Troubleshooting](#troubleshooting)
+3. [Server and Client Code](#server-and-client-code)
+4. [Launch Scripts](#launch-scripts)
+5. [Environment Variables](#environment-variables)
+6. [Design Decisions](#design-decisions)
+7. [Testing That It Works](#testing-that-it-works)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -106,7 +105,7 @@ Enable both: stderr for humans, OTel log records for machines.
 
 ---
 
-## Server Code
+## Server and Client Code
 
 ```python
 from opentelemetry.instrumentation.auto_instrumentation import initialize
@@ -123,6 +122,8 @@ import helloworld_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
+
+# --- server.py ---
 
 class GreeterServicer(helloworld_pb2_grpc.GreeterServicer):
     async def SayHello(self, request, context):
@@ -140,37 +141,7 @@ async def serve():
     await server.wait_for_termination()
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(serve())
-```
-
-Key points:
-- `initialize()` and all imports come **before** `import grpc`
-- The server code has zero OTel API calls -- `logger.info()` is plain Python logging
-- `grpc.aio.server()` returns an auto-instrumented server (monkey-patched by `initialize()`)
-- `logging.basicConfig(level=logging.INFO)` uses the trace-correlated format because `LoggingInstrumentor` patched `basicConfig` during `initialize()`
-- Uses `grpc.aio` (async API), the recommended approach for new gRPC Python applications
-
----
-
-## Client Code
-
-```python
-from opentelemetry.instrumentation.auto_instrumentation import initialize
-
-initialize()
-
-import asyncio
-import logging
-
-import grpc
-
-import helloworld_pb2
-import helloworld_pb2_grpc
-
-logger = logging.getLogger(__name__)
-
+# --- client.py ---
 
 async def run():
     async with grpc.aio.insecure_channel("localhost:50051") as channel:
@@ -179,27 +150,30 @@ async def run():
         logger.info("Greeter response: %s", response.message)
 
 
+# --- both ---
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run())
+    asyncio.run(serve())  # or asyncio.run(run())
 ```
 
 Key points:
-- Same `initialize()` + import order pattern as the server
-- `grpc.aio.insecure_channel()` returns an auto-instrumented channel
-- No manual span creation or context injection -- the interceptor handles everything
+- `initialize()` and all imports come **before** `import grpc` -- both server and client use the same preamble
+- The code has zero OTel API calls -- `logger.info()` is plain Python logging
+- `grpc.aio.server()` returns an auto-instrumented server, `grpc.aio.insecure_channel()` returns an auto-instrumented channel (both monkey-patched by `initialize()`)
+- No manual span creation or context injection -- the interceptors handle everything
+- `logging.basicConfig(level=logging.INFO)` uses the trace-correlated format because `LoggingInstrumentor` patched `basicConfig` during `initialize()`
+- Uses `grpc.aio` (async API), the recommended approach for new gRPC Python applications
 
 ---
 
 ## Launch Scripts
 
-### run_server.sh
-
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-export OTEL_SERVICE_NAME="grpc-server"
+export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
 export OTEL_METRICS_EXPORTER="none"
@@ -210,27 +184,7 @@ export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec python server.py
-```
-
-### run_client.sh
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-export OTEL_SERVICE_NAME="grpc-client"
-export OTEL_TRACES_EXPORTER="console"
-export OTEL_LOGS_EXPORTER="console"
-export OTEL_METRICS_EXPORTER="none"
-export OTEL_PROPAGATORS="tracecontext,baggage"
-export OTEL_PYTHON_LOG_CORRELATION="true"
-export OTEL_PYTHON_LOG_LEVEL="info"
-export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED="true"
-export OTEL_BSP_SCHEDULE_DELAY="1"
-export OTEL_BLRP_SCHEDULE_DELAY="1"
-
-exec python client.py
+exec python server.py  # or client.py
 ```
 
 ---
@@ -299,16 +253,7 @@ Both server and client use `grpc.aio` (the async API), the recommended approach 
 
 ## Testing That It Works
 
-### Step 1: Start the server and client
-
-```bash
-pip install -e ".[dev]"     # install dependencies
-./generate_protos.sh        # only needed once
-./run_server.sh             # terminal 1
-./run_client.sh             # terminal 2
-```
-
-### Step 2: Verify three types of output
+### Step 1: Verify three types of output
 
 **1. Python logging to stderr (trace-correlated):**
 ```
@@ -343,14 +288,14 @@ pip install -e ".[dev]"     # install dependencies
 }
 ```
 
-### Step 3: Verify trace linkage
+### Step 2: Verify trace linkage
 
 1. Find the client span's `span_id` in the client's stdout output
 2. Find the server span's `parent_id` in the server's stdout output
 3. They should match -- this confirms W3C Trace Context propagation is working
 4. Both spans should share the same `trace_id`
 
-### Step 4: Verify log correlation
+### Step 3: Verify log correlation
 
 The `trace_id` in the server's stderr log line should match the `trace_id` in both the client and server spans.
 
