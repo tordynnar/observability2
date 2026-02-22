@@ -5,13 +5,12 @@
 1. [Dependencies](#dependencies)
 2. [How It Works](#how-it-works)
 3. [Telemetry Initialization](#telemetry-initialization)
-4. [Server Code](#server-code)
-5. [Client Code](#client-code)
-6. [Launch Scripts](#launch-scripts)
-7. [Environment Variables](#environment-variables)
-8. [Design Decisions](#design-decisions)
-9. [Testing That It Works](#testing-that-it-works)
-10. [Troubleshooting](#troubleshooting)
+4. [Example Code](#example-code)
+5. [Launch Scripts](#launch-scripts)
+6. [Environment Variables](#environment-variables)
+7. [Design Decisions](#design-decisions)
+8. [Testing That It Works](#testing-that-it-works)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -151,7 +150,7 @@ func envDurationMs(key string, def time.Duration) time.Duration {
 
 ---
 
-## Server Code
+## Example Code
 
 ```go
 package main
@@ -162,8 +161,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	pb "example/go/pb"
@@ -179,21 +180,7 @@ func (s *greeterServer) SayHello(ctx context.Context, req *pb.HelloRequest) (*pb
 	return &pb.HelloReply{Message: "Hello, " + req.GetName() + "!"}, nil
 }
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	shutdown, err := telemetry.Init(ctx)
-	if err != nil {
-		slog.Error("failed to initialize telemetry", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := shutdown(context.Background()); err != nil {
-			slog.Error("telemetry shutdown error", "error", err)
-		}
-	}()
-
+func serve(ctx context.Context) {
 	lis, err := net.Listen("tcp", "[::]:50051")
 	if err != nil {
 		slog.Error("failed to listen", "error", err)
@@ -216,48 +203,8 @@ func main() {
 		os.Exit(1)
 	}
 }
-```
 
-Key points:
-- **`grpc.StatsHandler(otelgrpc.NewServerHandler())`** -- the recommended (non-deprecated) approach. The stats handler extracts `traceparent` from incoming metadata, creates a SERVER span, and injects it into the context.
-- **Signal handling** -- `signal.NotifyContext` creates a context cancelled on SIGINT. The goroutine watching `ctx.Done()` calls `GracefulStop()`.
-- **Shutdown uses `context.Background()`** -- the deferred shutdown creates a fresh context (not the cancelled signal context) to ensure the flush can complete.
-
----
-
-## Client Code
-
-```go
-package main
-
-import (
-	"context"
-	"log/slog"
-	"os"
-	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-
-	pb "example/go/pb"
-	"example/go/internal/telemetry"
-)
-
-func main() {
-	ctx := context.Background()
-
-	shutdown, err := telemetry.Init(ctx)
-	if err != nil {
-		slog.Error("failed to initialize telemetry", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := shutdown(context.Background()); err != nil {
-			slog.Error("telemetry shutdown error", "error", err)
-		}
-	}()
-
+func call(ctx context.Context) {
 	conn, err := grpc.NewClient("localhost:50051",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
@@ -281,32 +228,45 @@ func main() {
 
 	slog.InfoContext(ctx, "Greeter response", "message", resp.GetMessage())
 }
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	shutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		slog.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			slog.Error("telemetry shutdown error", "error", err)
+		}
+	}()
+
+	serve(ctx) // or call(ctx)
+}
 ```
 
 Key points:
-- **`grpc.NewClient`** (not the deprecated `grpc.Dial`) -- creates a client connection with the OTel stats handler.
+- **`grpc.StatsHandler(otelgrpc.NewServerHandler())`** -- the recommended (non-deprecated) approach. The stats handler extracts `traceparent` from incoming metadata, creates a SERVER span, and injects it into the context.
 - **`otelgrpc.NewClientHandler()`** -- automatically creates CLIENT spans and injects `traceparent` into outgoing metadata.
-- **5-second timeout** -- prevents the RPC from hanging indefinitely.
-- **`slog.InfoContext(ctx, ...)`** -- the `ctx` carries the client span, so the log record gets the client's trace context.
+- **`grpc.NewClient`** (not the deprecated `grpc.Dial`) -- creates a client connection with the OTel stats handler.
+- **Shutdown uses `context.Background()`** -- the deferred shutdown creates a fresh context (not the cancelled signal context) to ensure the flush can complete.
 
 ---
 
 ## Launch Scripts
 
-Both `run_server.sh` and `run_client.sh` follow the same pattern, differing only in `OTEL_SERVICE_NAME` and the `go run` target:
-
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
+export OTEL_SERVICE_NAME="example1"  # or "example2"
 export OTEL_TRACES_EXPORTER="console"
 export OTEL_LOGS_EXPORTER="console"
 export OTEL_PROPAGATORS="tracecontext,baggage"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
 
-exec go run ./cmd/server  # or ./cmd/client
+exec go run ./cmd/example
 ```
 
 ---
