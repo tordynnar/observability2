@@ -18,87 +18,25 @@
 
 ## Dependencies
 
-Rust edition 2021+, `protoc` installed (`brew install protobuf` on macOS). Dependencies managed by Cargo.
-
 ### Cargo.toml
 
 ```toml
-[package]
-name = "observability2-rust"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "server"
-path = "src/bin/server.rs"
-
-[[bin]]
-name = "client"
-path = "src/bin/client.rs"
-
 [dependencies]
-# gRPC
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-
-# OpenTelemetry core
 opentelemetry = { version = "0.31", features = ["trace", "logs"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-stdout = { version = "0.31", features = ["trace", "logs"] }
 opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "grpc-tonic"] }
-
-# Bridges: tracing <-> OTel
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.31"
 tonic-tracing-opentelemetry = { version = "0.32", features = ["tracing_level_info"] }
 tower = "0.5"
-
-[build-dependencies]
-tonic-build = "0.14"
-tonic-prost-build = "0.14"
 ```
-
-### What each crate does
-
-**gRPC:**
-
-| Crate | Role |
-|-------|------|
-| `tonic` | gRPC framework for Rust, built on tower/hyper. Server, Channel, codegen macros. |
-| `tonic-prost` | Runtime codec connecting tonic to prost for message serialization. Generated code references `tonic_prost::ProstCodec`. |
-| `prost` | Protocol Buffers runtime. Generated message types depend on it. |
-| `tokio` | Async runtime. Tonic requires tokio's multi-threaded runtime. `signal` feature for graceful shutdown. |
-
-**OpenTelemetry Core:**
-
-| Crate | Role |
-|-------|------|
-| `opentelemetry` | Public API: `global::set_tracer_provider()`, `global::set_text_map_propagator()`. No-op until SDK registered. |
-| `opentelemetry_sdk` | Concrete SDK: `SdkTracerProvider`, `BatchSpanProcessor`, `SdkLoggerProvider`. `rt-tokio` feature lets batch processors use the tokio runtime. |
-| `opentelemetry-stdout` | Console exporter: prints spans and log records as structured output to stdout. |
-| `opentelemetry-otlp` | OTLP exporter. `grpc-tonic` feature uses tonic as the gRPC transport for OTLP export. |
-
-**Bridges (tracing <-> OTel):**
-
-| Crate | Role |
-|-------|------|
-| `tracing` | Rust's de facto structured diagnostics crate. `info!`, `info_span!`, subscriber/layer pattern. All app logging goes through this. |
-| `tracing-subscriber` | Composable subscriber layers. `fmt::Layer` for human-readable stderr, `EnvFilter` for `RUST_LOG`, `Registry` to hold layers. |
-| `tracing-opentelemetry` | Bridges `tracing` spans -> OTel spans. Converts every `tracing::Span` into an OTel span. |
-| `opentelemetry-appender-tracing` | Bridges `tracing` events -> OTel log records. Converts every `tracing::info!()` into an OTel `LogRecord`. |
-| `tonic-tracing-opentelemetry` | Tower middleware layers for tonic: automatic span creation + context propagation for every RPC. `tracing_level_info` feature makes middleware spans use INFO level (default TRACE would be filtered out by `RUST_LOG=info`). |
-| `tower` | Composable middleware framework. Used with `ServiceBuilder` to wrap tonic channels. |
-
-**Build-time:**
-
-| Crate | Role |
-|-------|------|
-| `tonic-build` | Build dependency for tonic codegen. |
-| `tonic-prost-build` | Proto compiler for `build.rs`. Generates Rust types and gRPC service traits. |
 
 ---
 
@@ -114,23 +52,6 @@ The `tracing` ecosystem uses a **subscriber pattern**: a global subscriber compo
 
 A single `tracing::info!()` call simultaneously produces: a stderr log line, an OTel span event, and an OTel log record.
 
-### Implicit span context for logs
-
-Unlike Go where you must call `slog.InfoContext(ctx, ...)`, in Rust `tracing::info!()` inside a middleware-created span **automatically** associates with the parent span. The `OpenTelemetryTracingBridge` picks up the trace context without explicit context passing:
-
-```rust
-// Go -- context passing is explicit:
-slog.InfoContext(ctx, "Received request", "name", req.GetName())
-
-// Rust -- context is implicit via the middleware's span:
-async fn say_hello(&self, request: Request<HelloRequest>) -> ... {
-    tracing::info!(name = %name, "Received request");
-    // ^^^ automatically gets trace_id/span_id from the OtelGrpcLayer span
-}
-```
-
-This works because `tracing` maintains a task-local span stack. The `OtelGrpcLayer` enters a span for the duration of each RPC, and any `tracing` event within inherits the span context.
-
 ### Automatic context propagation
 
 `tonic-tracing-opentelemetry` provides tower middleware layers:
@@ -138,7 +59,7 @@ This works because `tracing` maintains a task-local span stack. The `OtelGrpcLay
 - **Server `OtelGrpcLayer`** -- extracts `traceparent` from incoming HTTP headers, creates a server span with RPC attributes, sets extracted context as parent.
 - **Client `OtelGrpcLayer`** -- creates a client span with RPC attributes, injects `traceparent` into outgoing HTTP headers.
 
-These are the Rust equivalent of Go's `otelgrpc.NewServerHandler()`/`NewClientHandler()`.
+These are the Rust equivalent of Go's `otelgrpc.NewServerHandler()`/`NewClientHandler()`. Context is implicit: `tracing` maintains a task-local span stack, so `tracing::info!()` inside a middleware-created span automatically inherits the trace context.
 
 ---
 
@@ -221,32 +142,6 @@ pub fn init() -> TelemetryGuard {
 }
 ```
 
-### What `init()` does step by step
-
-1. **Creates a Resource** via `Resource::builder().build()` -- includes `SdkProvidedResourceDetector` and `EnvResourceDetector`, which read `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` automatically.
-2. **Reads `OTEL_TRACES_EXPORTER`** and matches: `"console"` -> `opentelemetry_stdout::SpanExporter`, `"otlp"` -> OTLP exporter with tonic transport, anything else -> no exporter (spans dropped).
-3. **Builds `SdkTracerProvider`** and obtains a tracer named `"app"`. Registers globally.
-4. **Reads `OTEL_LOGS_EXPORTER`** and matches the same way for log records.
-5. **Builds `SdkLoggerProvider`** with the selected exporter.
-6. **Sets the global propagator** to W3C `TraceContextPropagator`.
-7. **Builds a layered subscriber** with four layers on a `Registry`: `EnvFilter` (RUST_LOG), `fmt::Layer` (stderr), `OpenTelemetryLayer` (traces), `OpenTelemetryTracingBridge` (logs).
-8. **Returns a `TelemetryGuard`** -- the RAII pattern. When dropped, its `Drop` impl calls `shutdown()` on both providers, flushing buffered data. Shutdown errors are silenced with `let _ =`.
-
-### The RAII Guard Pattern
-
-The guard **must** be held in a `let` binding for the lifetime of the application:
-
-```rust
-// CORRECT:
-let guard = telemetry::init();
-// ... application runs ...
-drop(guard);  // explicit flush at the end
-
-// WRONG -- providers shut down immediately:
-let _ = telemetry::init();  // guard dropped right here
-telemetry::init();           // return value discarded
-```
-
 ---
 
 ## Server Code
@@ -255,8 +150,8 @@ telemetry::init();           // return value discarded
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use observability2_rust::pb;
-use observability2_rust::telemetry;
+use example::pb;
+use example::telemetry;
 
 struct GreeterService;
 
@@ -301,9 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Key points:
 - **`OtelGrpcLayer::default()`** -- server-side tower middleware. Extracts `traceparent` from incoming metadata, creates a server span with RPC attributes, enters the span for the handler's duration.
-- **`tracing::info!(name = %name, "Received request")`** -- plain `tracing` macro. No OTel API. The `%name` syntax uses Display formatting as a structured field. Automatically gets trace context from the middleware span.
 - **`drop(guard)`** -- explicit flush at the end of `main()`. Critical for ensuring all buffered telemetry is exported before process exit.
-- **`serve_with_shutdown`** -- graceful Ctrl+C handling via `shutdown_signal()`.
 
 ---
 
@@ -313,8 +206,8 @@ Key points:
 use tonic::Request;
 use tower::ServiceBuilder;
 
-use observability2_rust::pb;
-use observability2_rust::telemetry;
+use example::pb;
+use example::telemetry;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -344,8 +237,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Key points:
 - **`ServiceBuilder::new().layer(OtelGrpcLayer).service(channel)`** -- wraps the raw tonic channel with client-side OTel middleware. Creates client spans and injects `traceparent`.
-- **`GreeterClient::new(channel)`** -- the generated client is generic over the service type, so it accepts the tower-wrapped channel.
-- **`drop(guard)`** -- especially critical for this short-lived process. Without it, the batch processor may not have flushed when the process exits.
 
 ---
 
@@ -418,17 +309,9 @@ exec cargo run --bin client
 
 ## Environment Variables
 
-| Variable | Value | Who Reads It |
-|----------|-------|-------------|
-| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `Resource::builder()` via `EnvResourceDetector` |
-| `OTEL_TRACES_EXPORTER` | `console` | `telemetry::init()` via `std::env::var()` -- `console`, `otlp`, or anything else (none) |
-| `OTEL_LOGS_EXPORTER` | `console` | `telemetry::init()` via `std::env::var()` -- `console`, `otlp`, or anything else (none) |
-| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Not read by code (propagator hardcoded as W3C TraceContext). Set for documentation consistency. |
-| `OTEL_BSP_SCHEDULE_DELAY` | `1` | SDK `BatchConfigBuilder::init_from_env_vars()` -- span flush interval (ms, default 5000) |
-| `OTEL_BLRP_SCHEDULE_DELAY` | `1` | SDK `BatchConfigBuilder::init_from_env_vars()` -- log flush interval (ms, default 1000) |
-| `RUST_LOG` | `info` | `tracing_subscriber::EnvFilter` -- controls which events are emitted. Supports per-module filtering (e.g., `RUST_LOG=info,hyper=warn`). |
+See SKILL.md for common `OTEL_*` environment variables. The one Rust-specific variable:
 
-### Rust-specific: `RUST_LOG` is critical
+### `RUST_LOG` is critical
 
 If `RUST_LOG` is not set, the `EnvFilter` defaults to `error` only. No INFO-level events will be emitted, which means no spans from the middleware (set to INFO level via `tracing_level_info` feature) and no application logs. Always set `RUST_LOG=info` at minimum.
 
@@ -436,9 +319,9 @@ If `RUST_LOG` is not set, the `EnvFilter` defaults to `error` only. No INFO-leve
 
 ## Design Decisions
 
-### 1. `tracing` over raw OTel API
+### 1. `tracing` with layered subscriber over raw OTel API
 
-Rust's `tracing` crate is the de facto structured diagnostics standard. Using it decouples application code from OTel -- the code uses `info!()` and `info_span!()`, and the OTel bridge layer handles export. This means the OTel backend can be swapped without changing any application code. You could replace OTel with any other `tracing` subscriber (e.g., Jaeger directly, or a custom subscriber) without touching a single log or span call.
+Rust's `tracing` crate is the de facto structured diagnostics standard. Using it decouples application code from OTel -- the code uses `info!()` and `info_span!()`, and the OTel bridge layer handles export. The `tracing-subscriber` registry composes fmt (stderr), OTel traces, and OTel logs in one subscriber, so a single `tracing::info!()` call simultaneously produces a stderr log line, an OTel span event, and an OTel log record.
 
 ### 2. `tonic` for gRPC
 
@@ -452,44 +335,18 @@ Rust idiom: compile protos at build time, never commit generated code. Unlike Go
 
 Provides tower middleware that auto-creates spans and propagates trace context. Eliminates manual `Injector`/`Extractor` code. The `tracing_level_info` feature is enabled so middleware spans are at INFO level -- without it, the default TRACE level would be filtered out by `RUST_LOG=info`, and you'd see no gRPC spans.
 
-### 5. Layered subscriber pattern
-
-The `tracing-subscriber` registry composes fmt (stderr), OTel traces, and OTel logs in one subscriber. A single `tracing::info!()` call simultaneously produces a stderr log line, an OTel span event, and an OTel log record. This is more unified than Go/Python where logging and tracing are separate systems.
-
-### 6. Implicit span context
-
-Unlike Go where you must pass `ctx` to every log call, Rust's `tracing::info!()` inside a handler automatically inherits the middleware's span context via the task-local span stack. This is less verbose and eliminates the "forgot to pass ctx" class of bugs.
-
-### 7. RAII guard for shutdown
-
-The `TelemetryGuard` with `Drop` ensures providers are always shut down, even on early return. Shutdown errors are silenced with `let _ =` because there's nothing useful to do with them at that point in the process lifecycle.
-
-### 8. Env-var-driven exporter selection
-
-`init()` reads `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` and uses a `match` to select exporters. Simpler than Go's `autoexport` package but covers the common cases (`console`, `otlp`, `none`). The OTLP exporter auto-reads `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, and `OTEL_EXPORTER_OTLP_HEADERS`.
-
 ---
 
 ## Testing That It Works
 
-### Step 1: Start the server and client
+Start the server and client (`cd rust && ./run_server.sh` in one terminal, `./run_client.sh` in another). First run triggers `cargo build`. Then follow the verification steps in SKILL.md (trace linkage, log correlation, span attributes).
 
-```bash
-cd rust
-./run_server.sh    # terminal 1 (first run compiles, takes a moment)
-./run_client.sh    # terminal 2
-```
-
-Note: First run triggers `cargo build`, which compiles protos and all dependencies. Requires `protoc` installed.
-
-### Step 2: Verify two types of output
-
-**1. Human-readable logs to stderr:**
+Rust-specific output format -- **stderr** (human-readable via `fmt::Layer`):
 ```
 2026-02-21T12:03:30Z  INFO helloworld.Greeter/SayHello{otel.kind="server" rpc.system="grpc" ...}: server: Received request name=World
 ```
 
-**2. OTel spans and log records to stdout:**
+**stdout** (console exporter spans):
 ```
 Spans
 Resource
@@ -504,7 +361,10 @@ Span #0
          ->  rpc.system: String(Owned("grpc"))
          ->  rpc.service: String(Owned("helloworld.Greeter"))
          ->  rpc.method: String(Owned("SayHello"))
+```
 
+**stdout** (console exporter logs):
+```
 Logs
 Log #0
     TraceId: 8267a68f2f0b720634bb2d30d0710acb
@@ -514,17 +374,6 @@ Log #0
     Attributes:
          ->  name: String(Owned("World"))
 ```
-
-### Step 3: Verify trace linkage
-
-1. Find the client span's `SpanId` in client stdout
-2. Find the server span's `ParentSpanId` in server stdout
-3. They should match
-4. Both should share the same `TraceId`
-
-### Step 4: Verify log correlation
-
-The `TraceId` and `SpanId` in the `Logs` section should match the server span.
 
 ---
 
@@ -568,16 +417,17 @@ apt install protobuf-compiler
 tonic-prost = "0.14"
 ```
 
-### 4. TelemetryGuard dropped too early
+### 4. TelemetryGuard dropped too early / client exits without exporting
 
-**Symptom:** No spans or log records appear, even though `RUST_LOG=info` is set and the middleware is attached.
+**Symptom:** No spans or log records appear, even though `RUST_LOG=info` is set and the middleware is attached. Especially common with short-lived clients.
 
-**Cause:** The `TelemetryGuard` was dropped prematurely, shutting down both providers. This happens if you write:
+**Cause:** The `TelemetryGuard` was dropped prematurely (shutting down both providers), or the process exited before the batch processor flushed. Common mistakes:
 ```rust
 let _ = telemetry::init();  // guard dropped immediately!
+telemetry::init();           // return value discarded
 ```
 
-**Fix:** Bind the guard and keep it alive:
+**Fix:** Bind the guard and call `drop(guard)` explicitly at the end of `main()`. This triggers `shutdown()` which forces a flush:
 ```rust
 let guard = telemetry::init();
 // ... application runs ...
@@ -621,10 +471,3 @@ Without this, no `traceparent` header is injected into outgoing metadata.
 tonic-tracing-opentelemetry = { version = "0.32", features = ["tracing_level_info"] }
 ```
 
-### 8. Short-lived client exits without exporting spans
-
-**Symptom:** Client runs successfully but no spans appear on stdout.
-
-**Cause:** The batch processor hasn't flushed before the process exits. The client is short-lived and may exit before the 1ms timer fires.
-
-**Fix:** Ensure `drop(guard)` is called explicitly at the end of `main()`. This triggers `shutdown()` which forces a flush. Without it, the guard drops when `main()` returns, but if there's an early return (e.g., `?` operator), the guard might not drop in time.
