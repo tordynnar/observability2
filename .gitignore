@@ -5,3 +5,9 @@ python/helloworld_pb2.py
 python/helloworld_pb2_grpc.py
 python/helloworld_pb2.pyi
 rust/target/
+python-test/.venv/
+python-test/__pycache__/
+python-test/*.pyc
+python-test/helloworld_pb2.py
+python-test/helloworld_pb2_grpc.py
+python-test/helloworld_pb2.pyi
