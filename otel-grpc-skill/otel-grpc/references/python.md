@@ -7,9 +7,8 @@
 3. [Server and Client Code](#server-and-client-code)
 4. [Launch Scripts](#launch-scripts)
 5. [Environment Variables](#environment-variables)
-6. [Design Decisions](#design-decisions)
-7. [Testing That It Works](#testing-that-it-works)
-8. [Troubleshooting](#troubleshooting)
+6. [Testing That It Works](#testing-that-it-works)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -158,10 +157,6 @@ if __name__ == "__main__":
 ```
 
 Key points:
-- `initialize()` and all imports come **before** `import grpc` -- both server and client use the same preamble
-- The code has zero OTel API calls -- `logger.info()` is plain Python logging
-- `grpc.aio.server()` returns an auto-instrumented server, `grpc.aio.insecure_channel()` returns an auto-instrumented channel (both monkey-patched by `initialize()`)
-- No manual span creation or context injection -- the interceptors handle everything
 - `logging.basicConfig(level=logging.INFO)` uses the trace-correlated format because `LoggingInstrumentor` patched `basicConfig` during `initialize()`
 - Uses `grpc.aio` (async API), the recommended approach for new gRPC Python applications
 
@@ -202,58 +197,13 @@ These are unique to the Python OTel SDK:
 | `OTEL_PYTHON_LOG_LEVEL` | `info` | Sets root logger level during `initialize()`. |
 | `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED` | `true` | Bridges Python `logging` into OTel Logs pipeline. Controls **stdout** OTel log records. |
 
-### All Variables Summary
-
-| Variable | Value | Who Reads It |
-|----------|-------|-------------|
-| `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | `OpenTelemetryConfigurator` during `initialize()` |
-| `OTEL_TRACES_EXPORTER` | `console` | Configurator -- creates `ConsoleSpanExporter` |
-| `OTEL_LOGS_EXPORTER` | `console` | Configurator -- creates `ConsoleLogExporter` |
-| `OTEL_METRICS_EXPORTER` | `none` | Configurator -- disables metrics entirely |
-| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Configurator -- W3C Trace Context + Baggage |
-| `OTEL_PYTHON_LOG_CORRELATION` | `true` | `LoggingInstrumentor` -- stderr trace context |
-| `OTEL_PYTHON_LOG_LEVEL` | `info` | Configurator -- root logger level |
-| `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED` | `true` | Configurator -- OTel log records |
-| `OTEL_BSP_SCHEDULE_DELAY` | `1` | `BatchSpanProcessor` -- flush interval (ms) |
-| `OTEL_BLRP_SCHEDULE_DELAY` | `1` | `BatchLogRecordProcessor` -- flush interval (ms) |
-
----
-
-## Design Decisions
-
-### 1. Programmatic auto-instrumentation over CLI launcher
-
-The project calls `initialize()` directly in Python code rather than using the `opentelemetry-instrument` CLI launcher. This is simpler, more explicit, and doesn't require wrapping your entrypoint in another process. The tradeoff is the strict import ordering requirement.
-
-### 2. Import order as the primary contract
-
-This is the single most important design decision. `initialize()` must come before `import grpc`. The gRPC instrumentors monkey-patch module-level references. If the import order is wrong, you get silent failure -- gRPC works normally but produces no telemetry.
-
-### 3. Metrics explicitly disabled
-
-`OTEL_METRICS_EXPORTER=none` prevents the SDK from creating a `PeriodicExportingMetricReader`. Without this, the gRPC instrumentation produces RPC metrics that get dumped to stdout every 60 seconds, interleaving with your span and log output. In development this is confusing; in production you'd enable metrics intentionally with a proper exporter.
-
-### 4. Both log correlation mechanisms enabled
-
-`OTEL_PYTHON_LOG_CORRELATION=true` gives human-readable stderr output with trace context. `OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true` gives machine-consumable OTel log records. They serve different audiences and should both be on.
-
-### 5. `opentelemetry-distro` is the glue
-
-This package provides the `OpenTelemetryConfigurator` that reads `OTEL_*` env vars and builds the SDK. Without it, `initialize()` still discovers and runs all instrumentors (monkey-patching happens), but no SDK is configured. The result is deceptive: log lines show the trace context format (`[trace_id=... span_id=...]`), but all values are `0`. Spans are `NonRecordingSpan` and silently discarded. This is the most common source of "everything looks right but nothing works."
-
-### 6. Async gRPC throughout
-
-Both server and client use `grpc.aio` (the async API), the recommended approach for new gRPC Python applications. It works with `asyncio.run()` and matches modern Python patterns.
-
-### 7. `logging.basicConfig()` comes last and still works
-
-`LoggingInstrumentor.instrument()` (triggered by `initialize()`) patches `logging.basicConfig` itself -- it replaces the default format string with one that includes trace context fields. When you later call `logging.basicConfig(level=logging.INFO)` without specifying a `format=`, the instrumented version's format takes effect. This is why you don't need a custom log format.
+See SKILL.md for common `OTEL_*` environment variables.
 
 ---
 
 ## Testing That It Works
 
-### Step 1: Verify three types of output
+See SKILL.md §"How to Verify It Works" for the general process (trace linkage, log correlation). Python produces three types of output:
 
 **1. Python logging to stderr (trace-correlated):**
 ```
@@ -288,17 +238,6 @@ Both server and client use `grpc.aio` (the async API), the recommended approach 
 }
 ```
 
-### Step 2: Verify trace linkage
-
-1. Find the client span's `span_id` in the client's stdout output
-2. Find the server span's `parent_id` in the server's stdout output
-3. They should match -- this confirms W3C Trace Context propagation is working
-4. Both spans should share the same `trace_id`
-
-### Step 3: Verify log correlation
-
-The `trace_id` in the server's stderr log line should match the `trace_id` in both the client and server spans.
-
 ---
 
 ## Troubleshooting
@@ -307,7 +246,7 @@ The `trace_id` in the server's stderr log line should match the `trace_id` in bo
 
 **Symptom:** Log lines show `[trace_id=0 span_id=0 ...]`. No spans appear on stdout.
 
-**Cause:** `opentelemetry-distro` is not installed. Without it, `initialize()` discovers and activates all instrumentors (monkey-patching happens), but no SDK is configured. Every span is a `NonRecordingSpan` with `trace_id=0`.
+**Cause:** `opentelemetry-distro` is not installed. See the [dependency table](#what-each-package-does) for why this package is critical.
 
 **Fix:** Add `opentelemetry-distro` to your dependencies and reinstall.
 
@@ -315,15 +254,9 @@ The `trace_id` in the server's stderr log line should match the `trace_id` in bo
 
 **Symptom:** Python `logging` output appears on stderr, but no span JSON appears on stdout.
 
-**Cause:** Import order is wrong -- `grpc` was imported before `initialize()`.
+**Cause:** Import order is wrong — `grpc` was imported before `initialize()`. See [Why the import order matters](#why-the-import-order-matters).
 
-**Fix:** Ensure `initialize()` is called before `import grpc`:
-```python
-from opentelemetry.instrumentation.auto_instrumentation import initialize
-initialize()
-# ALL other imports below
-import grpc
-```
+**Fix:** Ensure `initialize()` is called before `import grpc`.
 
 ### 3. Periodic metric dumps cluttering stdout
 
@@ -352,12 +285,9 @@ export OTEL_BLRP_SCHEDULE_DELAY="1"
 
 **Symptom:** Both client and server produce spans, but with different `trace_id` values.
 
-**Cause:** Context propagation is not working. Either:
-- `OTEL_PROPAGATORS` is not set (check the launch scripts)
-- `opentelemetry-distro` is missing (the configurator sets up propagators)
-- The gRPC instrumentors aren't patching correctly (check import order)
+**Cause:** Context propagation is broken — typically a combination of causes #1 and #2.
 
-**Fix:** Verify all three: `opentelemetry-distro` is installed, `OTEL_PROPAGATORS=tracecontext,baggage` is set, and `initialize()` comes before `import grpc`.
+**Fix:** Verify `opentelemetry-distro` is installed, `OTEL_PROPAGATORS=tracecontext,baggage` is set, and `initialize()` comes before `import grpc`.
 
 ### 6. `logging.basicConfig()` seems to have no effect
 
