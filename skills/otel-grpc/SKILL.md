@@ -146,6 +146,10 @@ It's the industry standard propagation format. All three OTel SDKs default to it
 
 Exporter selection, service naming, and batch tuning all happen via `OTEL_*` environment variables. The same binary can run in dev (`none` exporter), verification (`console` exporter), and production (`otlp` exporter) with zero code changes. Ops teams can tune telemetry without developer involvement.
 
+### Why launch scripts?
+
+Always create both a bash script (for Linux) and a `.cmd` script (for Windows) for each service. This keeps configuration out of application code and makes it easy to switch between dev/verification/production modes. Each reference file includes a launch script example -- use it as a starting point and create `run_server.sh` + `run_server.cmd` (and similarly for clients) in the project root. On Unix, use `exec` to replace the shell process with the application so signals propagate correctly.
+
 ### Why `none` in development?
 
 The `none` exporter disables telemetry output, keeping stdout clean during normal development. Switch to `console` when you need to verify that tracing and log correlation are working correctly -- console exporters print structured telemetry to stdout so you can see exactly what the SDK produces, including span linkage, trace IDs, and attributes. Once verified, switch back to `none` for development or `otlp` for production.
