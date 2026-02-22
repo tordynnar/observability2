@@ -8,7 +8,8 @@
 4. [Launch Scripts](#launch-scripts)
 5. [Environment Variables](#environment-variables)
 6. [Testing That It Works](#testing-that-it-works)
-7. [Troubleshooting](#troubleshooting)
+7. [Cancelling Server-Streaming Responses](#cancelling-server-streaming-responses)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -229,6 +230,34 @@ See SKILL.md §"How to Verify It Works" for the general process (trace linkage, 
 
 ---
 
+## Cancelling Server-Streaming Responses
+
+OpenTelemetry instrumentation wraps gRPC streams in an async generator, hiding the `.cancel()` method. Use this helper:
+
+```python
+async def cancel_stream(stream):
+    if hasattr(stream, "cancel"):
+        stream.cancel()
+    else:
+        await stream.aclose()
+```
+
+Usage:
+
+```python
+stream = stub.ServerStreamingMethod(request)
+async for response in stream:
+    if should_stop(response):
+        await cancel_stream(stream)
+        break
+```
+
+When the stream is instrumented, `aclose()` triggers `GeneratorExit` in the async generator, which hits the instrumentation's `finally: span.end()` block and cleanly ends the span.
+
+This works around a bug in `opentelemetry-instrumentation-grpc` 0.60b1 and earlier ([opentelemetry-python-contrib#2014](https://github.com/open-telemetry/opentelemetry-python-contrib/issues/2014)). Remove the helper once an upstream fix is released ([PR #3823](https://github.com/open-telemetry/opentelemetry-python-contrib/pull/3823), [PR #2093](https://github.com/open-telemetry/opentelemetry-python-contrib/pull/2093)).
+
+---
+
 ## Troubleshooting
 
 ### 1. All trace IDs are zero
@@ -278,7 +307,23 @@ export OTEL_BLRP_SCHEDULE_DELAY="1"
 
 **Fix:** Verify `opentelemetry-distro` is installed, `OTEL_PROPAGATORS=tracecontext,baggage` is set, and `initialize()` comes before `import grpc`.
 
-### 6. `logging.basicConfig()` seems to have no effect
+### 6. `AttributeError: 'async_generator' object has no attribute 'cancel'`
+
+**Symptom:** Calling `.cancel()` on a server-streaming response raises `AttributeError`.
+
+**Cause:** OTel gRPC instrumentation wraps the stream in an async generator, which lacks `.cancel()`.
+
+**Fix:** Use the `cancel_stream()` helper from [Cancelling Server-Streaming Responses](#cancelling-server-streaming-responses).
+
+### 7. `grpc.aio.AioRpcError` with `CANCELLED` after cancelling a stream
+
+**Symptom:** After cancelling a stream, continuing the `async for` loop raises `AioRpcError(CANCELLED)`.
+
+**Cause:** The behavior after cancelling depends on whether the stream is instrumented: a raw gRPC stream raises `AioRpcError(CANCELLED)` on the next iteration, while an instrumented async generator silently exits the loop (since `aclose()` closes the generator, causing `StopAsyncIteration`).
+
+**Fix:** Wrap the loop in `try`/`except grpc.aio.AioRpcError` and check for `StatusCode.CANCELLED` to handle this consistently.
+
+### 8. `logging.basicConfig()` seems to have no effect
 
 **Symptom:** Log format doesn't include trace context, or log level isn't what you expect.
 
