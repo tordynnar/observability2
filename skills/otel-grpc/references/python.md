@@ -159,8 +159,8 @@ Key points:
 
 ```bash
 export OTEL_SERVICE_NAME="grpc-server"  # or "grpc-client"
-export OTEL_TRACES_EXPORTER="console"
-export OTEL_LOGS_EXPORTER="console"
+export OTEL_TRACES_EXPORTER="none"
+export OTEL_LOGS_EXPORTER="none"
 export OTEL_METRICS_EXPORTER="none"
 export OTEL_PROPAGATORS="tracecontext,baggage"
 export OTEL_PYTHON_LOG_CORRELATION="true"

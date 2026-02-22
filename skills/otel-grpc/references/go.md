@@ -258,8 +258,8 @@ Key points:
 
 ```bash
 export OTEL_SERVICE_NAME="example1"  # or "example2"
-export OTEL_TRACES_EXPORTER="console"
-export OTEL_LOGS_EXPORTER="console"
+export OTEL_TRACES_EXPORTER="none"
+export OTEL_LOGS_EXPORTER="none"
 export OTEL_PROPAGATORS="tracecontext,baggage"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"
@@ -361,7 +361,7 @@ slog.InfoContext(ctx, "Received request", "name", req.GetName())
 **Possible causes:**
 - Stats handler not attached: check that `grpc.StatsHandler(otelgrpc.NewServerHandler())` is passed to `grpc.NewServer()`.
 - `telemetry.Init()` not called or its error not handled: if `Init()` returns an error and you ignore it, no providers are registered.
-- `OTEL_TRACES_EXPORTER` not set: if the env var is unset, `autoexport` may default to `otlp`, which fails silently without a collector. Set explicitly to `console`.
+- `OTEL_TRACES_EXPORTER` not set: if the env var is unset, `autoexport` may default to `otlp`, which fails silently without a collector. Set to `console` to verify spans are being produced, then switch back to `none` or `otlp`.
 
 **Fix:** Verify all three: `Init()` succeeds, stats handlers are attached, `OTEL_TRACES_EXPORTER=console` is set.
 

@@ -264,8 +264,8 @@ This requires `protoc` to be installed. On macOS: `brew install protobuf`. On De
 
 ```bash
 export OTEL_SERVICE_NAME="example1"  # or "example2"
-export OTEL_TRACES_EXPORTER="console"
-export OTEL_LOGS_EXPORTER="console"
+export OTEL_TRACES_EXPORTER="none"
+export OTEL_LOGS_EXPORTER="none"
 export OTEL_PROPAGATORS="tracecontext,baggage"
 export OTEL_BSP_SCHEDULE_DELAY="1"
 export OTEL_BLRP_SCHEDULE_DELAY="1"

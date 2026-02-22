@@ -1,6 +1,6 @@
 ---
 name: otel-grpc
-description: "How to add OpenTelemetry distributed tracing and correlated logs to gRPC services in Python, Go, and Rust. Use this skill whenever the user wants to add observability, tracing, telemetry, or log correlation to a gRPC application. Also use when the user mentions OpenTelemetry, OTel, distributed tracing, span propagation, or trace-correlated logging in the context of gRPC services -- even if they don't explicitly say 'OpenTelemetry'. Covers all three languages with complete code examples, dependency lists, environment variable configuration, and troubleshooting."
+description: "How to add OpenTelemetry distributed tracing and correlated logs to gRPC services in Python, Go, and Rust. Use this skill whenever the user wants to add observability, tracing, telemetry, or log correlation to a gRPC application. Also use when the user mentions OpenTelemetry, OTel, distributed tracing, span propagation, or trace-correlated logging in the context of gRPC services -- even if they don't explicitly say 'OpenTelemetry'. Trigger on language-specific contexts too: Python gRPC tracing, Go gRPC observability, Rust tonic tracing, grpcio instrumentation, otelgrpc, tonic-tracing-opentelemetry, or any combination of these languages with gRPC and telemetry concepts. Covers all three languages with complete code examples, dependency lists, environment variable configuration, and troubleshooting."
 ---
 
 # OpenTelemetry + gRPC: Distributed Tracing & Correlated Logs
@@ -96,7 +96,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 
 ## How to Verify It Works
 
-The verification process is the same across all languages. After starting the server and running the client:
+The verification process is the same across all languages. First, switch to the `console` exporter (`OTEL_TRACES_EXPORTER=console`, `OTEL_LOGS_EXPORTER=console`) so telemetry is printed to stdout. Then start the server and run the client:
 
 ### 1. Check for matching trace IDs
 
