@@ -59,8 +59,8 @@ These env vars work identically across all three languages. Set them in shell sc
 | Variable | Dev Value | Purpose |
 |----------|-----------|---------|
 | `OTEL_SERVICE_NAME` | `grpc-server` / `grpc-client` | Identifies the service in all telemetry |
-| `OTEL_TRACES_EXPORTER` | `console` | Exporter for spans: `console` (stdout), `otlp` (collector), `none` |
-| `OTEL_LOGS_EXPORTER` | `console` | Exporter for log records: `console`, `otlp`, `none` |
+| `OTEL_TRACES_EXPORTER` | `none` | Exporter for spans: `none` (disabled), `console` (stdout), `otlp` (collector) |
+| `OTEL_LOGS_EXPORTER` | `none` | Exporter for log records: `none`, `console`, `otlp` |
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | W3C Trace Context propagation |
 
 ### Batch Processor Tuning
@@ -72,11 +72,20 @@ These env vars work identically across all three languages. Set them in shell sc
 
 **Why 1ms in dev:** Batch processors buffer telemetry and flush periodically. With defaults (5 seconds for spans), you'd wait up to 5 seconds after a request before seeing output. Setting to 1ms gives near-instant feedback. Use defaults in production to amortize export overhead.
 
-### Switching to OTLP (Production)
+### Switching Exporters
 
-No code changes needed -- just change the environment variables:
+No code changes needed -- just change the environment variables. Use `none` in development, `console` to confirm tracing/logging is working, and `otlp` in production:
 
 ```bash
+# Development: telemetry disabled (no output noise)
+export OTEL_TRACES_EXPORTER="none"
+export OTEL_LOGS_EXPORTER="none"
+
+# Verification: confirm tracing and log correlation are working
+export OTEL_TRACES_EXPORTER="console"
+export OTEL_LOGS_EXPORTER="console"
+
+# Production: export to a collector
 export OTEL_TRACES_EXPORTER="otlp"
 export OTEL_LOGS_EXPORTER="otlp"
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
@@ -135,11 +144,11 @@ It's the industry standard propagation format. All three OTel SDKs default to it
 
 ### Why env-var-driven configuration?
 
-Exporter selection, service naming, and batch tuning all happen via `OTEL_*` environment variables. The same binary can run in dev (console exporter) and production (OTLP exporter) with zero code changes. Ops teams can tune telemetry without developer involvement.
+Exporter selection, service naming, and batch tuning all happen via `OTEL_*` environment variables. The same binary can run in dev (`none` exporter), verification (`console` exporter), and production (`otlp` exporter) with zero code changes. Ops teams can tune telemetry without developer involvement.
 
-### Why console exporters in development?
+### Why `none` in development?
 
-Console exporters print structured telemetry to stdout so you can see exactly what the SDK produces. This is essential for verifying span linkage, log correlation, and attributes before sending to a real backend where these issues are harder to debug.
+The `none` exporter disables telemetry output, keeping stdout clean during normal development. Switch to `console` when you need to verify that tracing and log correlation are working correctly -- console exporters print structured telemetry to stdout so you can see exactly what the SDK produces, including span linkage, trace IDs, and attributes. Once verified, switch back to `none` for development or `otlp` for production.
 
 ### Why explicit shutdown?
 
